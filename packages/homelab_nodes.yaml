@@ -1,0 +1,121 @@
+command_line:
+  - sensor:
+      name: Whitey Metrics
+      unique_id: node_metrics_whitey
+      command: "bash /config/scripts/node-metrics.sh 192.168.86.101"
+      command_timeout: 20
+      scan_interval: 60
+      value_template: "{{ 'online' if value_json.ok else 'error' }}"
+      json_attributes: &node_attrs
+        - host
+        - ts
+        - uptime_s
+        - load1
+        - load5
+        - load15
+        - cores
+        - mem_pct
+        - kernel
+        - os
+        - updates
+        - reboot_required
+        - filesystems
+        - docker
+        - docker_running
+        - docker_total
+        - units
+        - raid_ok
+        - raid
+        - sentinels
+
+  - sensor:
+      name: Larry Metrics
+      unique_id: node_metrics_larry
+      command: "bash /config/scripts/node-metrics.sh 192.168.86.102"
+      command_timeout: 20
+      scan_interval: 60
+      value_template: "{{ 'online' if value_json.ok else 'error' }}"
+      json_attributes: *node_attrs
+
+  - sensor:
+      name: Lumpy Metrics
+      unique_id: node_metrics_lumpy
+      command: "bash /config/scripts/node-metrics.sh 192.168.86.100"
+      command_timeout: 20
+      scan_interval: 60
+      value_template: "{{ 'online' if value_json.ok else 'error' }}"
+      json_attributes: *node_attrs
+
+  - sensor:
+      name: Uther Metrics
+      unique_id: node_metrics_uther
+      command: "bash /config/scripts/node-metrics.sh 192.168.86.103"
+      command_timeout: 20
+      scan_interval: 60
+      value_template: "{{ 'online' if value_json.ok else 'error' }}"
+      json_attributes: *node_attrs
+
+template:
+  - binary_sensor:
+      - name: Whitey Online
+        unique_id: node_online_whitey
+        device_class: connectivity
+        state: "{{ states('sensor.whitey_metrics') == 'online' }}"
+      - name: Larry Online
+        unique_id: node_online_larry
+        device_class: connectivity
+        state: "{{ states('sensor.larry_metrics') == 'online' }}"
+      - name: Lumpy Online
+        unique_id: node_online_lumpy
+        device_class: connectivity
+        state: "{{ states('sensor.lumpy_metrics') == 'online' }}"
+      - name: Uther Online
+        unique_id: node_online_uther
+        device_class: connectivity
+        state: "{{ states('sensor.uther_metrics') == 'online' }}"
+
+  - sensor:
+      - name: Homelab Nodes Online
+        unique_id: homelab_nodes_online
+        unit_of_measurement: "nodes"
+        state: >-
+          {{ ['sensor.whitey_metrics','sensor.larry_metrics',
+              'sensor.lumpy_metrics','sensor.uther_metrics']
+             | select('is_state','online') | list | count }}
+
+      - name: Oldest Backup Age
+        unique_id: homelab_oldest_backup_age
+        unit_of_measurement: "h"
+        state_class: measurement
+        state: >-
+          {% set s = state_attr('sensor.whitey_metrics','sentinels') %}
+          {{ (s | map(attribute='age_hours') | max) if s else 'unknown' }}
+        attributes:
+          detail: "{{ state_attr('sensor.whitey_metrics','sentinels') }}"
+
+      - name: Homelab Pending Updates
+        unique_id: homelab_pending_updates
+        unit_of_measurement: "pkgs"
+        state: >-
+          {% set ns = namespace(t=0) %}
+          {% for e in ['sensor.whitey_metrics','sensor.larry_metrics',
+                       'sensor.lumpy_metrics','sensor.uther_metrics'] %}
+            {% set u = state_attr(e,'updates') %}
+            {% if u is not none %}{% set ns.t = ns.t + (u | int(0)) %}{% endif %}
+          {% endfor %}
+          {{ ns.t }}
+
+      - name: Homelab Containers Running
+        unique_id: homelab_containers_running
+        unit_of_measurement: "containers"
+        state: >-
+          {{ (state_attr('sensor.whitey_metrics','docker_running') | int(0))
+           + (state_attr('sensor.lumpy_metrics','docker_running') | int(0)) }}
+
+recorder:
+  exclude:
+    entities:
+      - sensor.whitey_metrics
+      - sensor.larry_metrics
+      - sensor.lumpy_metrics
+      - sensor.uther_metrics

@@ -1,0 +1,28 @@
+# Secrets — never commit
+secrets.yaml
+.ssh/
+*.pem
+*.key
+
+# Database and logs
+*.db
+*.db-*
+home-assistant_v2.db*
+*.log
+*.log.*
+home-assistant.log*
+OZW_Log.txt
+
+# Runtime state
+.storage/
+.cloud/
+backups/
+tts/
+deps/
+image/
+.uuid
+.HA_VERSION
+
+# Editor noise
+*.swp
+*~
