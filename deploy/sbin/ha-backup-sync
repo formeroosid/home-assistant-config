@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Verify and mirror Home Assistant backups off the config tree.
+set -uo pipefail
+
+SRC="/srv/whitey-r6/VarData/Docker-data/HomeAssistant/config/backups"
+DEST="/srv/whitey-r6/Backups/HomeAssistant"
+SENTINEL="${DEST}/.last_backup"
+LOGDIR="/var/log/ha_bkup"
+LOG="${LOGDIR}/ha-backup-sync.log"
+MAX_AGE_HOURS=26
+DEST_RETAIN_DAYS=30
+ALERT="/usr/local/sbin/bkup-alert"
+
+mkdir -p "$DEST" "$LOGDIR"
+exec >> "$LOG" 2>&1
+echo "=== $(date -Is) ha-backup-sync start ==="
+
+fail() {
+  echo "FAIL: $1"
+  [ -x "$ALERT" ] && "$ALERT" "Home Assistant backup check failed on whitey: $1"
+  exit 1
+}
+
+[ -d "$SRC" ] || fail "backup dir missing: $SRC"
+
+newest=$(find "$SRC" -maxdepth 1 -type f -name '*.tar' -printf '%T@ %p\n' \
+         | sort -rn | head -1 | cut -d' ' -f2-)
+[ -n "$newest" ] || fail "no backup archives found in $SRC"
+
+if [ -n "$(find "$newest" -mmin +$((MAX_AGE_HOURS * 60)))" ]; then
+  fail "newest backup is stale: $newest ($(date -r "$newest" -Is))"
+fi
+
+tar -tf "$newest" >/dev/null 2>&1 || fail "archive failed integrity check: $newest"
+
+rsync -a --no-owner --no-group "$SRC"/ "$DEST"/
+rc=$?
+case $rc in
+  0)     ;;
+  23|24) echo "WARN: rsync partial transfer (rc=$rc), continuing" ;;
+  *)     fail "rsync failed with rc=$rc" ;;
+esac
+
+find "$DEST" -maxdepth 1 -type f -name '*.tar' -mtime +${DEST_RETAIN_DAYS} -delete
+
+bytes=$(du -sb "$DEST" | cut -f1)
+printf '%s\n%s\n' "$(date -Is)" "$bytes" > "$SENTINEL"
+echo "OK: newest=$(basename "$newest") dest_bytes=${bytes}"

@@ -1,0 +1,8 @@
+[Unit]
+Description=Verify and mirror Home Assistant backups
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ha-backup-sync

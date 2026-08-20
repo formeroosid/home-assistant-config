@@ -1,0 +1,8 @@
+[Unit]
+Description=Snapshot and commit Home Assistant config to git
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ha-config-commit

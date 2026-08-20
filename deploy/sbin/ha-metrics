@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Home Assistant monitoring collector.
+# Invoked as a forced command from hamon's authorized_keys. Ignores client input.
+# Must ALWAYS emit valid JSON on stdout, even on partial failure.
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+
+HOST=$(hostname -s 2>/dev/null || echo unknown)
+
+j_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/ /g'; }
+
+# --- common vitals -----------------------------------------------------------
+UPTIME_S=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+read -r L1 L5 L15 _ < /proc/loadavg 2>/dev/null || { L1=0; L5=0; L15=0; }
+CORES=$(nproc 2>/dev/null || echo 1)
+
+MEM_TOTAL=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+MEM_AVAIL=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+if [ "$MEM_TOTAL" -gt 0 ] 2>/dev/null; then
+  MEM_PCT=$(awk -v t="$MEM_TOTAL" -v a="$MEM_AVAIL" 'BEGIN{printf "%.1f",(t-a)/t*100}')
+else
+  MEM_PCT=0
+fi
+
+KERNEL=$(uname -r 2>/dev/null)
+OS=$(. /etc/os-release 2>/dev/null && printf '%s' "$PRETTY_NAME")
+
+REBOOT=false
+[ -f /var/run/reboot-required ] && REBOOT=true
+
+UPDATES=0
+if [ -x /usr/lib/update-notifier/apt-check ]; then
+  UPDATES=$(/usr/lib/update-notifier/apt-check 2>&1 | cut -d';' -f1)
+fi
+case "$UPDATES" in ''|*[!0-9]*) UPDATES=0 ;; esac
+
+# --- filesystems -------------------------------------------------------------
+FS_JSON=$(df -PB1 -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs 2>/dev/null \
+  | awk 'NR>1 && $2>1000000 && $6 !~ /^\/(sys|run|proc|dev)/ {
+      printf "%s{\"mount\":\"%s\",\"total\":%s,\"used\":%s,\"pct\":%.1f}",
+        (n++?",":""), $6, $2, $3, ($3/$2)*100
+    }')
+# --- docker ------------------------------------------------------------------
+DOCKER_JSON=""
+DOCKER_RUNNING=0
+DOCKER_TOTAL=0
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  while IFS='|' read -r name state image; do
+    [ -z "$name" ] && continue
+    DOCKER_TOTAL=$((DOCKER_TOTAL+1))
+    [ "$state" = "running" ] && DOCKER_RUNNING=$((DOCKER_RUNNING+1))
+    DOCKER_JSON="${DOCKER_JSON}${DOCKER_JSON:+,}{\"name\":\"$(j_str "$name")\",\"state\":\"$(j_str "$state")\",\"image\":\"$(j_str "$image")\"}"
+  done < <(docker ps -a --format '{{.Names}}|{{.State}}|{{.Image}}' 2>/dev/null)
+fi
+
+# --- systemd units (host-specific) -------------------------------------------
+case "$HOST" in
+  uther) UNITS="sonarr radarr prowlarr qbittorrent-nox wg-quick@pia vpn-netns pia-refresh-wireguard.timer postfix" ;;
+  whitey) UNITS="docker ssh rsyslog ha-backup-sync.timer" ;;
+  lumpy) UNITS="docker ssh" ;;
+  *)     UNITS="ssh" ;;
+esac
+
+UNITS_JSON=""
+for u in $UNITS; do
+  st=$(systemctl is-active "$u" 2>/dev/null || true)
+  [ -z "$st" ] && st="unknown"
+  UNITS_JSON="${UNITS_JSON}${UNITS_JSON:+,}{\"unit\":\"$(j_str "$u")\",\"state\":\"$(j_str "$st")\"}"
+done
+
+# --- mdadm RAID --------------------------------------------------------------
+RAID_OK=true
+RAID_JSON=""
+if [ -r /proc/mdstat ]; then
+  while read -r dev; do
+    [ -z "$dev" ] && continue
+    status=$(awk -v d="$dev" '$0 ~ "^"d" " {found=1; next} found && /\[[U_]+\]/ {print $NF; exit}' /proc/mdstat)
+    [ -z "$status" ] && status="[unknown]"
+    case "$status" in *_*) RAID_OK=false ;; esac
+    RAID_JSON="${RAID_JSON}${RAID_JSON:+,}{\"array\":\"$(j_str "$dev")\",\"status\":\"$(j_str "$status")\"}"
+  done < <(awk '/^md[0-9]+ :/{print $1}' /proc/mdstat 2>/dev/null)
+fi
+
+# --- backup sentinels (whitey only) ------------------------------------------
+SENTINEL_JSON=""
+if [ "$HOST" = "whitey" ]; then
+  now=$(date +%s)
+    for s in /srv/whitey-r6/Workstations/MyStash/*/*/.last_backup \
+           /srv/whitey-r6/Backups/HomeAssistant/.last_backup; do
+    [ -r "$s" ] || continue
+    label=$(basename "$(dirname "$s")")
+    mt=$(stat -c %Y "$s" 2>/dev/null || echo 0)
+    age_h=$(( (now - mt) / 3600 ))
+    SENTINEL_JSON="${SENTINEL_JSON}${SENTINEL_JSON:+,}{\"source\":\"$(j_str "$label")\",\"age_hours\":${age_h}}"
+  done
+fi
+
+# --- emit --------------------------------------------------------------------
+cat <<EOF
+{"host":"$(j_str "$HOST")","ok":true,"ts":"$(date -Is)",
+"uptime_s":${UPTIME_S},"load1":${L1},"load5":${L5},"load15":${L15},"cores":${CORES},
+"mem_pct":${MEM_PCT},"mem_total_kb":${MEM_TOTAL},
+"kernel":"$(j_str "$KERNEL")","os":"$(j_str "$OS")",
+"updates":${UPDATES},"reboot_required":${REBOOT},
+"filesystems":[${FS_JSON}],
+"docker_running":${DOCKER_RUNNING},"docker_total":${DOCKER_TOTAL},"docker":[${DOCKER_JSON}],
+"units":[${UNITS_JSON}],
+"raid_ok":${RAID_OK},"raid":[${RAID_JSON}],
+"sentinels":[${SENTINEL_JSON}]}
+EOF

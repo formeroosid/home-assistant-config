@@ -22,6 +22,9 @@ deps/
 image/
 .uuid
 .HA_VERSION
+.cache/
+.ha_run.lock
+*.lock
 
 # Editor noise
 *.swp

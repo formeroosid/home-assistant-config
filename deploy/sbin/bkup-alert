@@ -1,0 +1,19 @@
+#!/bin/bash
+set -uo pipefail
+SUBJECT="${1:?subject required}"
+LOGFILE="${2:?logfile required}"
+LINES="${3:-30}"
+MAIL_TO="jamie@jamiegordon.net"
+MAIL_FROM="mcguffin@swampcastle.biz"
+RELAY_HOST="jgordon@uther"
+
+BODY="Host:    $(hostname -s)
+Time:    $(date '+%Y-%m-%dT%H:%M:%S%z')
+Logfile: $LOGFILE
+
+--- last $LINES log lines ---
+$(tail -n "$LINES" "$LOGFILE" 2>/dev/null || echo '(log unreadable)')
+"
+printf 'From: %s\nTo: %s\nSubject: %s\n\n%s\n' \
+  "$MAIL_FROM" "$MAIL_TO" "$SUBJECT" "$BODY" \
+| ssh -o BatchMode=yes -o ConnectTimeout=15 "$RELAY_HOST" '/usr/sbin/sendmail -t -oi'

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Snapshot out-of-tree HA infrastructure files into the config repo and commit.
+# Safe to run repeatedly; commits only when something changed.
+set -uo pipefail
+
+CFG=/srv/whitey-r6/VarData/Docker-data/HomeAssistant/config
+LOG=/var/log/ha_bkup/ha-config-commit.log
+export GIT_DIR="$CFG/.git" GIT_WORK_TREE="$CFG"
+
+log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
+
+install -d -m 750 "$(dirname "$LOG")"
+cd "$CFG" || { log "FATAL: cannot cd $CFG"; exit 1; }
+
+# --- snapshot infrastructure files ------------------------------------------
+for f in ha-metrics ha-backup-sync ha-config-commit bkup-alert; do
+  [ -f "/usr/local/sbin/$f" ] && install -m 644 "/usr/local/sbin/$f" "deploy/sbin/$f"
+done
+
+for u in ha-backup-sync.service ha-backup-sync.timer ha-config-commit.service ha-config-commit.timer; do
+  [ -f "/etc/systemd/system/$u" ] && install -m 644 "/etc/systemd/system/$u" "deploy/systemd/$u"
+done
+
+[ -f /etc/logrotate.d/ha_bkup ] && install -m 644 /etc/logrotate.d/ha_bkup deploy/logrotate/ha_bkup
+
+# --- commit ------------------------------------------------------------------
+git add -A
+if git diff --cached --quiet; then
+  log "no changes"
+  exit 0
+fi
+
+SUMMARY=$(git diff --cached --name-only | head -5 | tr '\n' ' ')
+git -c user.name="Jamie Gordon" -c user.email="jamie@jamiegordon.net" \
+    commit -q -m "Auto-commit $(date +%F): ${SUMMARY}" || { log "commit failed"; exit 1; }
+log "committed: ${SUMMARY}"
+
+# --- push (non-fatal: must not alarm when the internet is down) -------------
+if git push -q origin main 2>>"$LOG"; then
+  log "pushed"
+else
+  log "WARN: push failed, commit is local only"
+fi
+exit 0
