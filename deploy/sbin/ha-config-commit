@@ -24,7 +24,7 @@ done
 [ -f /etc/logrotate.d/ha_bkup ] && install -m 644 /etc/logrotate.d/ha_bkup deploy/logrotate/ha_bkup
 
 # --- snapshot lumpy rsnapshot files (non-fatal if lumpy is unreachable) ------
-LUMPY_HOST=jgordon@192.168.86.100
+LUMPY_HOST=lumpy
 LUMPY_FILES="usr/local/sbin/ha-rsnapshot-state usr/local/sbin/ha-rsnapshot-run etc/rsnapshot-lumpy.conf etc/systemd/system/ha-rsnapshot-state.service etc/systemd/system/ha-rsnapshot-state.timer"
 
 install -d -m 755 deploy/lumpy
