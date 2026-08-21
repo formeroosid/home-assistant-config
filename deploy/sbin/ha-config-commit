@@ -23,6 +23,22 @@ done
 
 [ -f /etc/logrotate.d/ha_bkup ] && install -m 644 /etc/logrotate.d/ha_bkup deploy/logrotate/ha_bkup
 
+# --- snapshot lovelace dashboards out of .storage ----------------------------
+for f in "$CFG"/.storage/lovelace* ; do
+  [ -f "$f" ] || continue
+  out="deploy/dashboards/$(basename "$f").json"
+  if python3 -c "
+import json,sys
+d=json.load(open('$f'))
+json.dump(d.get('data',{}).get('config',d), open('$out','w'), indent=2, sort_keys=True)
+" 2>/dev/null; then
+    :
+  else
+    log \"WARN: could not parse $f\"
+  fi
+done
+
+
 # --- commit ------------------------------------------------------------------
 git add -A
 if git diff --cached --quiet; then

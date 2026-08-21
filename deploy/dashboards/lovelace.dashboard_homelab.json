@@ -1,0 +1,220 @@
+{
+  "views": [
+    {
+      "max_columns": 3,
+      "path": "overview",
+      "sections": [
+        {
+          "cards": [
+            {
+              "heading": "At a Glance",
+              "heading_style": "title",
+              "type": "heading"
+            },
+            {
+              "content": "{%- set nodes = [('whitey','Whitey'),('larry','Larry'),('lumpy','Lumpy'),('uther','Uther')] %}\n{%- set ns = namespace(alerts=[]) %}\n{%- for h, label in nodes %}\n{%- set e = 'sensor.' ~ h ~ '_metrics' %}\n{%- if states(e) != 'online' %}\n{%- set ns.alerts = ns.alerts + ['**' ~ label ~ ' unreachable**'] %}\n{%- else %}\n{%- if state_attr(e,'reboot_required') %}\n{%- set ns.alerts = ns.alerts + [label ~ ' needs reboot'] %}\n{%- endif %}\n{%- if not state_attr(e,'raid_ok') %}\n{%- set ns.alerts = ns.alerts + ['**' ~ label ~ ' RAID degraded**'] %}\n{%- endif %}\n{%- set u = state_attr(e,'updates') | int(0) %}\n{%- if u > 0 %}\n{%- set ns.alerts = ns.alerts + [label ~ ': ' ~ u ~ ' updates'] %}\n{%- endif %}\n{%- for f in state_attr(e,'filesystems') or [] %}\n{%- if f.pct | float(0) > 85 %}\n{%- set ns.alerts = ns.alerts + ['**' ~ label ~ ' ' ~ f.mount ~ ' at ' ~ f.pct ~ '%**'] %}\n{%- endif %}\n{%- endfor %}\n{%- for c in state_attr(e,'docker') or [] %}\n{%- if c.state != 'running' %}\n{%- set ns.alerts = ns.alerts + ['**' ~ label ~ ': ' ~ c.name ~ ' ' ~ c.state ~ '**'] %}\n{%- endif %}\n{%- endfor %}\n{%- for s in state_attr(e,'units') or [] %}\n{%- if s.state not in ['active','unknown'] %}\n{%- set ns.alerts = ns.alerts + ['**' ~ label ~ ': ' ~ s.unit ~ ' ' ~ s.state ~ '**'] %}\n{%- endif %}\n{%- endfor %}\n{%- endif %}\n{%- endfor %}\n{%- set b = states('sensor.oldest_backup_age') | int(-1) %}\n{%- if b > 30 %}\n{%- set ns.alerts = ns.alerts + ['**Backup stale: ' ~ b ~ 'h**'] %}\n{%- endif %}\n{%- if ns.alerts %}\n## Attention\n{% for a in ns.alerts %}- {{ a }}\n{% endfor %}\n{%- else %}\n## All systems nominal\nFour nodes online, backups current, no pending updates.\n{%- endif %}\n",
+              "type": "markdown"
+            },
+            {
+              "cards": [
+                {
+                  "entity": "sensor.homelab_nodes_online",
+                  "max": 4,
+                  "min": 0,
+                  "name": "Nodes",
+                  "needle": true,
+                  "severity": {
+                    "green": 3.5,
+                    "red": 0,
+                    "yellow": 2
+                  },
+                  "type": "gauge"
+                },
+                {
+                  "entity": "sensor.oldest_backup_age",
+                  "max": 48,
+                  "min": 0,
+                  "name": "Backup Age",
+                  "needle": true,
+                  "severity": {
+                    "green": 0,
+                    "red": 36,
+                    "yellow": 26
+                  },
+                  "type": "gauge",
+                  "unit": "h"
+                }
+              ],
+              "type": "horizontal-stack"
+            },
+            {
+              "cards": [
+                {
+                  "entity": "sensor.homelab_containers_running",
+                  "icon": "mdi:docker",
+                  "name": "Containers",
+                  "type": "tile"
+                },
+                {
+                  "entity": "sensor.homelab_pending_updates",
+                  "icon": "mdi:package-up",
+                  "name": "Updates",
+                  "type": "tile"
+                }
+              ],
+              "type": "horizontal-stack"
+            },
+            {
+              "heading": "Nodes",
+              "heading_style": "subtitle",
+              "type": "heading"
+            },
+            {
+              "entity": "binary_sensor.whitey_online",
+              "icon": "mdi:server",
+              "name": "Whitey",
+              "type": "tile"
+            },
+            {
+              "entity": "binary_sensor.larry_online",
+              "icon": "mdi:desktop-tower",
+              "name": "Larry",
+              "type": "tile"
+            },
+            {
+              "entity": "binary_sensor.lumpy_online",
+              "icon": "mdi:multimedia",
+              "name": "Lumpy",
+              "type": "tile"
+            },
+            {
+              "entity": "binary_sensor.uther_online",
+              "icon": "mdi:download-network",
+              "name": "Uther",
+              "type": "tile"
+            }
+          ],
+          "type": "grid"
+        },
+        {
+          "cards": [
+            {
+              "heading": "Backups",
+              "heading_style": "title",
+              "type": "heading"
+            },
+            {
+              "content": "| Source | Age |\n|---|---:|\n{% for s in state_attr('sensor.oldest_backup_age','detail') or [] %}| {{ s.source }} | {{ s.age_hours }}h {{ '\u26a0\ufe0f' if s.age_hours > 30 else '' }} |\n{% endfor %}\n",
+              "type": "markdown"
+            },
+            {
+              "heading": "Home Assistant Backup",
+              "heading_style": "subtitle",
+              "type": "heading"
+            },
+            {
+              "entity": "sensor.backup_last_successful_automatic_backup",
+              "name": "Last Successful",
+              "type": "tile"
+            },
+            {
+              "entity": "sensor.backup_next_scheduled_automatic_backup",
+              "name": "Next Scheduled",
+              "type": "tile"
+            },
+            {
+              "entity": "sensor.backup_backup_manager_state",
+              "name": "Manager",
+              "type": "tile"
+            }
+          ],
+          "type": "grid"
+        },
+        {
+          "cards": [
+            {
+              "heading": "Uther \u2014 Servarr & VPN",
+              "heading_style": "title",
+              "type": "heading"
+            },
+            {
+              "content": "| Service | State |\n|---|:---:|\n{% for s in state_attr('sensor.uther_metrics','units') or [] %}| {{ s.unit }} | {{ '\u2705' if s.state == 'active' else '\u274c ' ~ s.state }} |\n{% endfor %}\n",
+              "type": "markdown"
+            }
+          ],
+          "type": "grid"
+        }
+      ],
+      "title": "Overview",
+      "type": "sections"
+    },
+    {
+      "max_columns": 2,
+      "path": "nodes",
+      "sections": [
+        {
+          "cards": [
+            {
+              "heading": "Whitey",
+              "heading_style": "title",
+              "icon": "mdi:server",
+              "type": "heading"
+            },
+            {
+              "content": "{%- set e = 'sensor.whitey_metrics' %}\n**{{ state_attr(e,'os') }}** \u00b7 kernel `{{ state_attr(e,'kernel') }}`\n{%- if state_attr(e,'reboot_required') %} \u00b7 \u26a0\ufe0f **reboot required**{% endif %}\n\nUp **{{ (state_attr(e,'uptime_s') | int(0) / 86400) | round(1) }}** days \u00b7 load **{{ state_attr(e,'load1') }}** / {{ state_attr(e,'cores') }} cores \u00b7 mem **{{ state_attr(e,'mem_pct') }}%**\n\n| Mount | Size | Used |\n|---|---:|---:|\n{% for f in state_attr(e,'filesystems') or [] %}| `{{ f.mount }}` | {% if f.total > 1024**4 %}{{ (f.total / 1024**4) | round(2) }} TB{% else %}{{ (f.total / 1024**3) | round(1) }} GB{% endif %} | {{ f.pct }}% |\n{% endfor %}\n{%- if state_attr(e,'raid') %}\n\n| Array | Status |\n|---|:---:|\n{% for r in state_attr(e,'raid') %}| `{{ r.array }}` | `{{ r.status }}` |\n{% endfor %}\n{%- endif %}\n\n**Containers \u2014 {{ state_attr(e,'docker_running') }}/{{ state_attr(e,'docker_total') }} running**\n\n| | Name | Image |\n|:---:|---|---|\n{% for c in state_attr(e,'docker') or [] %}| {{ '\u2705' if c.state == 'running' else '\u274c' }} | `{{ c.name }}` | `{{ c.image }}` |\n{% endfor %}\n",
+              "type": "markdown"
+            }
+          ],
+          "type": "grid"
+        },
+        {
+          "cards": [
+            {
+              "heading": "Lumpy",
+              "heading_style": "title",
+              "icon": "mdi:multimedia",
+              "type": "heading"
+            },
+            {
+              "content": "{%- set e = 'sensor.lumpy_metrics' %}\n**{{ state_attr(e,'os') }}** \u00b7 kernel `{{ state_attr(e,'kernel') }}`\n{%- if state_attr(e,'reboot_required') %} \u00b7 \u26a0\ufe0f **reboot required**{% endif %}\n\nUp **{{ (state_attr(e,'uptime_s') | int(0) / 86400) | round(1) }}** days \u00b7 load **{{ state_attr(e,'load1') }}** / {{ state_attr(e,'cores') }} cores \u00b7 mem **{{ state_attr(e,'mem_pct') }}%**\n\n| Mount | Size | Used |\n|---|---:|---:|\n{% for f in state_attr(e,'filesystems') or [] %}| `{{ f.mount }}` | {% if f.total > 1024**4 %}{{ (f.total / 1024**4) | round(2) }} TB{% else %}{{ (f.total / 1024**3) | round(1) }} GB{% endif %} | {{ f.pct }}% |\n{% endfor %}\n{%- if state_attr(e,'raid') %}\n\n| Array | Status |\n|---|:---:|\n{% for r in state_attr(e,'raid') %}| `{{ r.array }}` | `{{ r.status }}` |\n{% endfor %}\n{%- endif %}\n\n**Containers \u2014 {{ state_attr(e,'docker_running') }}/{{ state_attr(e,'docker_total') }} running**\n\n| | Name | Image |\n|:---:|---|---|\n{% for c in state_attr(e,'docker') or [] %}| {{ '\u2705' if c.state == 'running' else '\u274c' }} | `{{ c.name }}` | `{{ c.image }}` |\n{% endfor %}\n",
+              "type": "markdown"
+            }
+          ],
+          "type": "grid"
+        },
+        {
+          "cards": [
+            {
+              "heading": "Larry",
+              "heading_style": "title",
+              "icon": "mdi:desktop-tower",
+              "type": "heading"
+            },
+            {
+              "content": "{%- set e = 'sensor.larry_metrics' %}\n**{{ state_attr(e,'os') }}** \u00b7 kernel `{{ state_attr(e,'kernel') }}`\n{%- if state_attr(e,'reboot_required') %} \u00b7 \u26a0\ufe0f **reboot required**{% endif %}\n\nUp **{{ (state_attr(e,'uptime_s') | int(0) / 86400) | round(1) }}** days \u00b7 load **{{ state_attr(e,'load1') }}** / {{ state_attr(e,'cores') }} cores \u00b7 mem **{{ state_attr(e,'mem_pct') }}%**\n\n| Mount | Size | Used |\n|---|---:|---:|\n{% for f in state_attr(e,'filesystems') or [] %}| `{{ f.mount }}` | {% if f.total > 1024**4 %}{{ (f.total / 1024**4) | round(2) }} TB{% else %}{{ (f.total / 1024**3) | round(1) }} GB{% endif %} | {{ f.pct }}% |\n{% endfor %}\n",
+              "type": "markdown"
+            }
+          ],
+          "type": "grid"
+        },
+        {
+          "cards": [
+            {
+              "heading": "Uther",
+              "heading_style": "title",
+              "icon": "mdi:download-network",
+              "type": "heading"
+            },
+            {
+              "content": "{%- set e = 'sensor.uther_metrics' %}\n**{{ state_attr(e,'os') }}** \u00b7 kernel `{{ state_attr(e,'kernel') }}`\n{%- if state_attr(e,'reboot_required') %} \u00b7 \u26a0\ufe0f **reboot required**{% endif %}\n\nUp **{{ (state_attr(e,'uptime_s') | int(0) / 86400) | round(1) }}** days \u00b7 load **{{ state_attr(e,'load1') }}** / {{ state_attr(e,'cores') }} cores \u00b7 mem **{{ state_attr(e,'mem_pct') }}%**\n\n| Mount | Size | Used |\n|---|---:|---:|\n{% for f in state_attr(e,'filesystems') or [] %}| `{{ f.mount }}` | {% if f.total > 1024**4 %}{{ (f.total / 1024**4) | round(2) }} TB{% else %}{{ (f.total / 1024**3) | round(1) }} GB{% endif %} | {{ f.pct }}% |\n{% endfor %}\n\n| Service | State |\n|---|:---:|\n{% for s in state_attr(e,'units') or [] %}| `{{ s.unit }}` | {{ '\u2705' if s.state == 'active' else '\u274c ' ~ s.state }} |\n{% endfor %}\n",
+              "type": "markdown"
+            }
+          ],
+          "type": "grid"
+        }
+      ],
+      "title": "Nodes",
+      "type": "sections"
+    }
+  ]
+}

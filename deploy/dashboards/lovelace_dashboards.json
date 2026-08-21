@@ -1,0 +1,27 @@
+{
+  "data": {
+    "items": [
+      {
+        "icon": "mdi:map",
+        "id": "map",
+        "mode": "storage",
+        "require_admin": false,
+        "show_in_sidebar": true,
+        "title": "Map",
+        "url_path": "map"
+      },
+      {
+        "icon": "mdi:server-network",
+        "id": "dashboard_homelab",
+        "mode": "storage",
+        "require_admin": true,
+        "show_in_sidebar": true,
+        "title": "Homelab",
+        "url_path": "dashboard-homelab"
+      }
+    ]
+  },
+  "key": "lovelace_dashboards",
+  "minor_version": 1,
+  "version": 1
+}
