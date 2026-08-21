@@ -1,0 +1,50 @@
+#!/bin/sh
+# ha-rsnapshot-run — run rsnapshot and record the outcome for Home Assistant.
+# usage: ha-rsnapshot-run <config> <level>
+# Writes /var/lib/ha-metrics/rsnapshot-lastrun, then refreshes the HA state file.
+# Exits with rsnapshot's own return code so cron still reports failures by mail.
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+CONF="$1"
+LEVEL="$2"
+RUNDIR=/var/lib/ha-metrics
+LR="$RUNDIR/rsnapshot-lastrun"
+STATE=/usr/local/sbin/ha-rsnapshot-state
+
+if [ -z "$CONF" ] || [ -z "$LEVEL" ]; then
+  echo "usage: $0 <rsnapshot-config> <level>" >&2
+  exit 64
+fi
+
+if [ ! -r "$CONF" ]; then
+  echo "$0: cannot read config: $CONF" >&2
+  exit 66
+fi
+
+mkdir -p "$RUNDIR" || exit 1
+
+STARTED=$(date +%s)
+rsnapshot -c "$CONF" "$LEVEL"
+RC=$?
+ENDED=$(date +%s)
+DURATION=$(( ENDED - STARTED ))
+
+tmp=$(mktemp "$RUNDIR/.lastrun.XXXXXX") || exit 1
+{
+  echo "level=$LEVEL"
+  echo "rc=$RC"
+  echo "started=$STARTED"
+  echo "duration=$DURATION"
+  echo "finished=$ENDED"
+  echo "config=$CONF"
+} > "$tmp"
+chmod 644 "$tmp"
+mv -f "$tmp" "$LR"
+
+if [ -x "$STATE" ]; then
+  "$STATE" "$CONF" >/dev/null 2>&1
+fi
+
+exit $RC

@@ -23,6 +23,33 @@ done
 
 [ -f /etc/logrotate.d/ha_bkup ] && install -m 644 /etc/logrotate.d/ha_bkup deploy/logrotate/ha_bkup
 
+# --- snapshot lumpy rsnapshot files (non-fatal if lumpy is unreachable) ------
+LUMPY_HOST=jgordon@192.168.86.100
+LUMPY_FILES="usr/local/sbin/ha-rsnapshot-state usr/local/sbin/ha-rsnapshot-run etc/rsnapshot-lumpy.conf etc/systemd/system/ha-rsnapshot-state.service etc/systemd/system/ha-rsnapshot-state.timer"
+
+install -d -m 755 deploy/lumpy
+tmpd=$(mktemp -d) || tmpd=""
+if [ -n "$tmpd" ]; then
+  if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
+       "$LUMPY_HOST" "tar -cf - -C / $LUMPY_FILES" 2>>"$LOG" \
+     | tar -xf - -C "$tmpd" 2>>"$LOG"; then
+    n=0
+    for p in $LUMPY_FILES; do
+      if [ -f "$tmpd/$p" ]; then
+        install -m 644 "$tmpd/$p" "deploy/lumpy/$(basename "$p")"
+        n=$((n + 1))
+      fi
+    done
+    log "lumpy: snapshotted $n of 5 rsnapshot files"
+    [ "$n" -eq 5 ] || log "WARN: lumpy returned only $n of 5 expected files"
+  else
+    log "WARN: could not pull rsnapshot files from lumpy; keeping previous copies"
+  fi
+  rm -rf "$tmpd"
+else
+  log "WARN: mktemp failed; skipped lumpy snapshot"
+fi
+
 # --- snapshot lovelace dashboards out of .storage ----------------------------
 for f in "$CFG"/.storage/lovelace* ; do
   [ -f "$f" ] || continue

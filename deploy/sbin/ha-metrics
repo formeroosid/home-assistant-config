@@ -36,7 +36,7 @@ fi
 case "$UPDATES" in ''|*[!0-9]*) UPDATES=0 ;; esac
 
 # --- filesystems -------------------------------------------------------------
-FS_JSON=$(df -PB1 -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs 2>/dev/null \
+FS_JSON=$(timeout 8 df -PB1 -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs 2>/dev/null \
   | awk 'NR>1 && $2>1000000 && $6 !~ /^\/(sys|run|proc|dev)/ {
       printf "%s{\"mount\":\"%s\",\"total\":%s,\"used\":%s,\"pct\":%.1f}",
         (n++?",":""), $6, $2, $3, ($3/$2)*100
@@ -95,7 +95,18 @@ if [ "$HOST" = "whitey" ]; then
     SENTINEL_JSON="${SENTINEL_JSON}${SENTINEL_JSON:+,}{\"source\":\"$(j_str "$label")\",\"age_hours\":${age_h}}"
   done
 fi
-
+# --- state files written by root-run helpers ---------------------------------
+EXTRA_JSON=""
+for f in /var/lib/ha-metrics/*.json; do
+  [ -r "$f" ] || continue
+  key=$(basename "$f" .json)
+  body=$(tr -d '\n' < "$f")
+  case "$body" in
+    '{'*'}') ;;
+    *) continue ;;
+  esac
+  EXTRA_JSON="${EXTRA_JSON}${EXTRA_JSON:+,}\"${key}\":${body}"
+done
 # --- emit --------------------------------------------------------------------
 cat <<EOF
 {"host":"$(j_str "$HOST")","ok":true,"ts":"$(date -Is)",
@@ -107,5 +118,6 @@ cat <<EOF
 "docker_running":${DOCKER_RUNNING},"docker_total":${DOCKER_TOTAL},"docker":[${DOCKER_JSON}],
 "units":[${UNITS_JSON}],
 "raid_ok":${RAID_OK},"raid":[${RAID_JSON}],
+"extra":{${EXTRA_JSON}},
 "sentinels":[${SENTINEL_JSON}]}
 EOF

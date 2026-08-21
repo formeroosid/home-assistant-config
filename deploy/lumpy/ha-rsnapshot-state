@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# Emit rsnapshot state as JSON for Home Assistant monitoring.
+# Runs as root: the snapshot tree is drwx--S--- root:users, unreadable to hamon.
+# Every probe against the snapshot root is timeout-bounded because the root is
+# an autofs-managed hard NFS mount that blocks indefinitely when whitey is down.
+set -uo pipefail
+
+CONF=${1:-/etc/rsnapshot-lumpy.conf}
+RUNDIR=/var/lib/ha-metrics
+OUT="$RUNDIR/rsnapshot.json"
+
+install -d -m 755 "$RUNDIR"
+
+j_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/ /g'; }
+cfg()   { awk -v k="$1" '$1==k{print $2; exit}' "$CONF" 2>/dev/null; }
+
+NOW=$(date +%s)
+OK=true
+ERR=""
+
+[ -r "$CONF" ] || { OK=false; ERR="config unreadable: $CONF"; }
+
+ROOT=$(cfg snapshot_root); ROOT=${ROOT%/}
+LOCK=$(cfg lockfile)
+LOGF=$(cfg logfile)
+NCR=$(cfg no_create_root); case "$NCR" in 1) NCR=1 ;; *) NCR=0 ;; esac
+
+# --- is the NFS root mounted and responding? --------------------------------
+MOUNTED=false
+STALLED=false
+ROOT_LOCAL=false
+FSTYPE="unknown"
+SOURCE=""
+
+if [ -n "$ROOT" ]; then
+  FSTYPE=$(timeout 5 findmnt -n -T "$ROOT" -o FSTYPE 2>/dev/null | tail -1)
+  SOURCE=$(timeout 5 findmnt -n -T "$ROOT" -o SOURCE 2>/dev/null | tail -1)
+  [ -z "$FSTYPE" ] && FSTYPE="unknown"
+
+  case "$FSTYPE" in
+    nfs|nfs4|cifs) MOUNTED=true ;;
+    *) : ;;
+  esac
+
+  # A responsive probe: if this times out, the server is unreachable and the
+  # hard mount is blocking. Distinguish that from "genuinely missing".
+  if timeout 8 test -d "$ROOT" 2>/dev/null; then
+    rdev=$(timeout 5 stat -c %d "$ROOT" 2>/dev/null || echo -1)
+    sdev=$(stat -c %d / 2>/dev/null || echo -2)
+    if [ "$rdev" = "$sdev" ]; then
+      ROOT_LOCAL=true; OK=false
+      ERR="snapshot_root resolved to the local root filesystem - network mount absent"
+    fi
+  else
+    rc=$?
+    if [ "$rc" -ge 124 ]; then
+      STALLED=true; OK=false; ERR="snapshot_root probe timed out - NFS server unreachable"
+    else
+      OK=false; ERR="snapshot_root missing: $ROOT"
+    fi
+  fi
+fi
+
+# --- enumerate snapshots in one bounded call ---------------------------------
+SNAP_LIST=""
+LIST_OK=false
+if [ "$STALLED" != true ] && [ "$ROOT_LOCAL" != true ] && [ -n "$ROOT" ]; then
+  if SNAP_LIST=$(timeout 20 find "$ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' 2>/dev/null); then
+    LIST_OK=true
+  else
+    OK=false; ERR="${ERR:-snapshot listing failed or timed out}"
+  fi
+fi
+
+LEV_JSON=""
+while IFS=: read -r name keep; do
+  [ -z "$name" ] && continue
+  case "$keep" in ''|*[!0-9]*) keep=0 ;; esac
+  count=0; age=-1
+  if [ "$LIST_OK" = true ]; then
+    count=$(printf '%s\n' "$SNAP_LIST" | awk -v n="$name" '$2 ~ "^"n"\\.[0-9]+$" {c++} END{print c+0}')
+    newest=$(printf '%s\n' "$SNAP_LIST" | awk -v n="$name" '$2==n".0"{printf "%d", $1; exit}')
+    case "$newest" in ''|*[!0-9]*) newest=0 ;; esac
+    [ "$newest" -gt 0 ] && age=$(( (NOW - newest) / 3600 ))
+  fi
+  short=false
+  [ "$LIST_OK" = true ] && [ "$count" -lt "$keep" ] && short=true
+  LEV_JSON="${LEV_JSON}${LEV_JSON:+,}{\"level\":\"$(j_str "$name")\",\"retain\":${keep},\"count\":${count},\"age_hours\":${age},\"short\":${short}}"
+done < <(awk '$1=="retain"||$1=="interval"{print $2":"$3}' "$CONF" 2>/dev/null)
+
+# --- stale lock: blocks every subsequent run until cleared -------------------
+LOCK_PRESENT=false
+LOCK_AGE=-1
+LOCK_ALIVE=false
+if [ -n "$LOCK" ] && [ -e "$LOCK" ]; then
+  LOCK_PRESENT=true
+  lt=$(stat -c %Y "$LOCK" 2>/dev/null || echo 0)
+  [ "$lt" -gt 0 ] 2>/dev/null && LOCK_AGE=$(( (NOW - lt) / 3600 ))
+  pid=$(head -1 "$LOCK" 2>/dev/null | tr -dc '0-9')
+  [ -n "$pid" ] && [ -d "/proc/$pid" ] && LOCK_ALIVE=true
+fi
+
+# --- snapshot volume (bounded) ----------------------------------------------
+DISK_PCT=-1
+DISK_FREE=0
+if [ "$STALLED" != true ] && [ -n "$ROOT" ]; then
+  read -r DISK_PCT DISK_FREE < <(timeout 8 df -PB1 "$ROOT" 2>/dev/null | awk 'NR==2{print $5+0, $4}')
+  DISK_PCT=${DISK_PCT:--1}
+  DISK_FREE=${DISK_FREE:-0}
+fi
+
+# --- log signal: only unresolved problems since the last success -------------
+LOG_ERRORS=0
+LOG_WARNINGS=0
+LOG_LAST=""
+if [ -n "$LOGF" ] && [ -r "$LOGF" ]; then
+  read -r LOG_ERRORS LOG_WARNINGS < <(tail -600 "$LOGF" | awk '
+    /completed successfully/ { e=0; w=0; next }
+    /ERROR/                  { e++ }
+    /[Ww]arning|WARNING/     { w++ }
+    END { print e+0, w+0 }')
+  case "$LOG_ERRORS"   in ''|*[!0-9]*) LOG_ERRORS=0 ;; esac
+  case "$LOG_WARNINGS" in ''|*[!0-9]*) LOG_WARNINGS=0 ;; esac
+  LOG_LAST=$(tail -1 "$LOGF" | cut -c1-180)
+fi
+
+# --- last run, recorded by ha-rsnapshot-run ---------------------------------
+RL="unknown"; RRC=-1; RAGE=-1; RDUR=-1
+LR="$RUNDIR/rsnapshot-lastrun"
+if [ -r "$LR" ]; then
+  RL=$(awk -F= '$1=="level"{print $2}'      "$LR")
+  RRC=$(awk -F= '$1=="rc"{print $2}'        "$LR")
+  st=$(awk -F= '$1=="started"{print $2}'    "$LR")
+  RDUR=$(awk -F= '$1=="duration"{print $2}' "$LR")
+  [ -z "$RL" ] && RL="unknown"
+  case "$RRC"  in ''|*[!0-9-]*) RRC=-1 ;; esac
+  case "$RDUR" in ''|*[!0-9-]*) RDUR=-1 ;; esac
+  case "$st"   in ''|*[!0-9]*)  st=0 ;; esac
+  [ "$st" -gt 0 ] && RAGE=$(( (NOW - st) / 3600 ))
+fi
+
+# --- emit atomically --------------------------------------------------------
+tmp=$(mktemp "$RUNDIR/.rsnapshot.XXXXXX") || exit 1
+cat > "$tmp" <<EOF
+{"ok":${OK},"error":"$(j_str "$ERR")","ts":"$(date -Is)",
+"config":"$(j_str "$CONF")","snapshot_root":"$(j_str "$ROOT")",
+"mounted":${MOUNTED},"stalled":${STALLED},"root_local":${ROOT_LOCAL},
+"fstype":"$(j_str "$FSTYPE")","source":"$(j_str "$SOURCE")",
+"no_create_root":${NCR},"list_ok":${LIST_OK},
+"levels":[${LEV_JSON}],
+"lock_present":${LOCK_PRESENT},"lock_alive":${LOCK_ALIVE},"lock_age_hours":${LOCK_AGE},
+"disk_pct":${DISK_PCT},"disk_free_bytes":${DISK_FREE},
+"log_errors":${LOG_ERRORS},"log_warnings":${LOG_WARNINGS},"log_last":"$(j_str "$LOG_LAST")",
+"last_run_level":"$(j_str "$RL")","last_run_rc":${RRC},
+"last_run_age_hours":${RAGE},"last_run_seconds":${RDUR}}
+EOF
+chmod 644 "$tmp"
+mv -f "$tmp" "$OUT"

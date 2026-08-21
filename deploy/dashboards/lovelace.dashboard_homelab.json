@@ -108,37 +108,13 @@
               "type": "markdown"
             },
             {
-              "heading": "Home Assistant Backup",
+              "heading": "Lumpy rsnapshot",
               "heading_style": "subtitle",
+              "icon": "mdi:camera-burst",
               "type": "heading"
             },
             {
-              "entity": "sensor.backup_last_successful_automatic_backup",
-              "name": "Last Successful",
-              "type": "tile"
-            },
-            {
-              "entity": "sensor.backup_next_scheduled_automatic_backup",
-              "name": "Next Scheduled",
-              "type": "tile"
-            },
-            {
-              "entity": "sensor.backup_backup_manager_state",
-              "name": "Manager",
-              "type": "tile"
-            }
-          ],
-          "type": "grid"
-        },
-        {
-          "cards": [
-            {
-              "heading": "Uther \u2014 Servarr & VPN",
-              "heading_style": "title",
-              "type": "heading"
-            },
-            {
-              "content": "| Service | State |\n|---|:---:|\n{% for s in state_attr('sensor.uther_metrics','units') or [] %}| {{ s.unit }} | {{ '\u2705' if s.state == 'active' else '\u274c ' ~ s.state }} |\n{% endfor %}\n",
+              "content": "{% set rs = (state_attr(\"sensor.lumpy_metrics\",\"extra\") or {}).get(\"rsnapshot\") %}\n  {% if rs is none %}\n  No rsnapshot state reported. Check the ha-rsnapshot-state timer on lumpy.\n  {% else %}\n  {% set bad = (not rs.mounted) or rs.stalled or rs.root_local or (rs.no_create_root | int != 1) or (rs.lock_present and not rs.lock_alive) or (rs.log_errors | int > 0) or (rs.last_run_rc | int > 0) or (not rs.list_ok) %}\n  **{% if bad %}Problem{% else %}Healthy{% endif %}**{% if rs.lock_alive %} - backup running now{% endif %}\n\n  | Level | Snapshots | Newest |\n  |---|:---:|---:|\n  {% for l in rs.levels %}| {{ l.level }} | {{ l.count }} / {{ l.retain }} | {% if l.age_hours | int < 0 %}unknown{% elif l.age_hours | int > 72 %}{{ l.age_hours | int // 24 }} d{% else %}{{ l.age_hours }} h{% endif %} |\n  {% endfor %}\n\n  {{ rs.fstype }} {{ rs.source }}\n\n  Volume {{ rs.disk_pct }}% used, {{ (rs.disk_free_bytes | int / 1024**4) | round(1) }} TB free\n\n  Errors since last success: {{ rs.log_errors }}\n  {% if not rs.mounted or rs.stalled %}\n\n  **ALERT: snapshot root unreachable**\n  {% endif %}\n  {% if rs.root_local %}\n\n  **ALERT: snapshot root is on local disk, NFS absent**\n  {% endif %}\n  {% if rs.no_create_root | int != 1 %}\n\n  **ALERT: no_create_root is 0, may fill lumpy root fs**\n  {% endif %}\n  {% if rs.lock_present and not rs.lock_alive %}\n\n  **ALERT: stale lockfile, future runs blocked**\n  {% endif %}\n  {% if rs.last_run_rc | int > 0 %}\n\n  **ALERT: last run exited {{ rs.last_run_rc }}**\n  {% endif %}\n  {% if rs.last_run_rc | int >= 0 %}\n\n  Last run: {{ rs.last_run_level }}, exit {{ rs.last_run_rc }}, {{ (rs.last_run_seconds | int / 60) | round(0) | int }} min, {{ rs.last_run_age_hours }}h ago\n  {% endif %}\n  {% endif %}",
               "type": "markdown"
             }
           ],
@@ -146,74 +122,6 @@
         }
       ],
       "title": "Overview",
-      "type": "sections"
-    },
-    {
-      "max_columns": 2,
-      "path": "nodes",
-      "sections": [
-        {
-          "cards": [
-            {
-              "heading": "Whitey",
-              "heading_style": "title",
-              "icon": "mdi:server",
-              "type": "heading"
-            },
-            {
-              "content": "{%- set e = 'sensor.whitey_metrics' %}\n**{{ state_attr(e,'os') }}** \u00b7 kernel `{{ state_attr(e,'kernel') }}`\n{%- if state_attr(e,'reboot_required') %} \u00b7 \u26a0\ufe0f **reboot required**{% endif %}\n\nUp **{{ (state_attr(e,'uptime_s') | int(0) / 86400) | round(1) }}** days \u00b7 load **{{ state_attr(e,'load1') }}** / {{ state_attr(e,'cores') }} cores \u00b7 mem **{{ state_attr(e,'mem_pct') }}%**\n\n| Mount | Size | Used |\n|---|---:|---:|\n{% for f in state_attr(e,'filesystems') or [] %}| `{{ f.mount }}` | {% if f.total > 1024**4 %}{{ (f.total / 1024**4) | round(2) }} TB{% else %}{{ (f.total / 1024**3) | round(1) }} GB{% endif %} | {{ f.pct }}% |\n{% endfor %}\n{%- if state_attr(e,'raid') %}\n\n| Array | Status |\n|---|:---:|\n{% for r in state_attr(e,'raid') %}| `{{ r.array }}` | `{{ r.status }}` |\n{% endfor %}\n{%- endif %}\n\n**Containers \u2014 {{ state_attr(e,'docker_running') }}/{{ state_attr(e,'docker_total') }} running**\n\n| | Name | Image |\n|:---:|---|---|\n{% for c in state_attr(e,'docker') or [] %}| {{ '\u2705' if c.state == 'running' else '\u274c' }} | `{{ c.name }}` | `{{ c.image }}` |\n{% endfor %}\n",
-              "type": "markdown"
-            }
-          ],
-          "type": "grid"
-        },
-        {
-          "cards": [
-            {
-              "heading": "Lumpy",
-              "heading_style": "title",
-              "icon": "mdi:multimedia",
-              "type": "heading"
-            },
-            {
-              "content": "{%- set e = 'sensor.lumpy_metrics' %}\n**{{ state_attr(e,'os') }}** \u00b7 kernel `{{ state_attr(e,'kernel') }}`\n{%- if state_attr(e,'reboot_required') %} \u00b7 \u26a0\ufe0f **reboot required**{% endif %}\n\nUp **{{ (state_attr(e,'uptime_s') | int(0) / 86400) | round(1) }}** days \u00b7 load **{{ state_attr(e,'load1') }}** / {{ state_attr(e,'cores') }} cores \u00b7 mem **{{ state_attr(e,'mem_pct') }}%**\n\n| Mount | Size | Used |\n|---|---:|---:|\n{% for f in state_attr(e,'filesystems') or [] %}| `{{ f.mount }}` | {% if f.total > 1024**4 %}{{ (f.total / 1024**4) | round(2) }} TB{% else %}{{ (f.total / 1024**3) | round(1) }} GB{% endif %} | {{ f.pct }}% |\n{% endfor %}\n{%- if state_attr(e,'raid') %}\n\n| Array | Status |\n|---|:---:|\n{% for r in state_attr(e,'raid') %}| `{{ r.array }}` | `{{ r.status }}` |\n{% endfor %}\n{%- endif %}\n\n**Containers \u2014 {{ state_attr(e,'docker_running') }}/{{ state_attr(e,'docker_total') }} running**\n\n| | Name | Image |\n|:---:|---|---|\n{% for c in state_attr(e,'docker') or [] %}| {{ '\u2705' if c.state == 'running' else '\u274c' }} | `{{ c.name }}` | `{{ c.image }}` |\n{% endfor %}\n",
-              "type": "markdown"
-            }
-          ],
-          "type": "grid"
-        },
-        {
-          "cards": [
-            {
-              "heading": "Larry",
-              "heading_style": "title",
-              "icon": "mdi:desktop-tower",
-              "type": "heading"
-            },
-            {
-              "content": "{%- set e = 'sensor.larry_metrics' %}\n**{{ state_attr(e,'os') }}** \u00b7 kernel `{{ state_attr(e,'kernel') }}`\n{%- if state_attr(e,'reboot_required') %} \u00b7 \u26a0\ufe0f **reboot required**{% endif %}\n\nUp **{{ (state_attr(e,'uptime_s') | int(0) / 86400) | round(1) }}** days \u00b7 load **{{ state_attr(e,'load1') }}** / {{ state_attr(e,'cores') }} cores \u00b7 mem **{{ state_attr(e,'mem_pct') }}%**\n\n| Mount | Size | Used |\n|---|---:|---:|\n{% for f in state_attr(e,'filesystems') or [] %}| `{{ f.mount }}` | {% if f.total > 1024**4 %}{{ (f.total / 1024**4) | round(2) }} TB{% else %}{{ (f.total / 1024**3) | round(1) }} GB{% endif %} | {{ f.pct }}% |\n{% endfor %}\n",
-              "type": "markdown"
-            }
-          ],
-          "type": "grid"
-        },
-        {
-          "cards": [
-            {
-              "heading": "Uther",
-              "heading_style": "title",
-              "icon": "mdi:download-network",
-              "type": "heading"
-            },
-            {
-              "content": "{%- set e = 'sensor.uther_metrics' %}\n**{{ state_attr(e,'os') }}** \u00b7 kernel `{{ state_attr(e,'kernel') }}`\n{%- if state_attr(e,'reboot_required') %} \u00b7 \u26a0\ufe0f **reboot required**{% endif %}\n\nUp **{{ (state_attr(e,'uptime_s') | int(0) / 86400) | round(1) }}** days \u00b7 load **{{ state_attr(e,'load1') }}** / {{ state_attr(e,'cores') }} cores \u00b7 mem **{{ state_attr(e,'mem_pct') }}%**\n\n| Mount | Size | Used |\n|---|---:|---:|\n{% for f in state_attr(e,'filesystems') or [] %}| `{{ f.mount }}` | {% if f.total > 1024**4 %}{{ (f.total / 1024**4) | round(2) }} TB{% else %}{{ (f.total / 1024**3) | round(1) }} GB{% endif %} | {{ f.pct }}% |\n{% endfor %}\n\n| Service | State |\n|---|:---:|\n{% for s in state_attr(e,'units') or [] %}| `{{ s.unit }}` | {{ '\u2705' if s.state == 'active' else '\u274c ' ~ s.state }} |\n{% endfor %}\n",
-              "type": "markdown"
-            }
-          ],
-          "type": "grid"
-        }
-      ],
-      "title": "Nodes",
       "type": "sections"
     }
   ]

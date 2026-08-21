@@ -1,0 +1,6 @@
+[Unit]
+Description=Write rsnapshot state JSON for Home Assistant
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ha-rsnapshot-state /etc/rsnapshot-lumpy.conf

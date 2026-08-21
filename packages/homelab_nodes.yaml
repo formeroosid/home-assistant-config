@@ -27,6 +27,7 @@ command_line:
         - raid_ok
         - raid
         - sentinels
+        - extra
 
   - sensor:
       name: Larry Metrics
