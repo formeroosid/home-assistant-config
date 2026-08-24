@@ -1,0 +1,8 @@
+[Unit]
+Description=Collect PIA tunnel and vpn namespace state for Home Assistant
+After=network-online.target vpn-netns.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ha-vpn-state

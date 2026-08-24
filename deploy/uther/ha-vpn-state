@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/ha-vpn-state
+# Observe (never repair) the PIA WireGuard tunnel and the vpn network namespace.
+# Writes /var/lib/ha-metrics/vpn.json for ha-metrics to expose to Home Assistant.
+# Read-only: no service is started, stopped, or reconfigured here.
+set -uo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+NS=vpn
+WG_IF=pia
+VETH_NS=veth-vpn
+HOST_IP=10.200.200.1
+GW=192.168.86.1
+RESOLVER=192.168.86.101
+OUTDIR=/var/lib/ha-metrics
+OUT="$OUTDIR/vpn.json"
+CACHE="$OUTDIR/vpn-egress.cache"
+EGRESS_TTL=900          # re-check public IPs at most every 15 min
+NSPATH=/var/run/netns/$NS
+
+NOW=$(date +%s)
+install -d -m 755 "$OUTDIR"
+
+# ---------- helpers ----------------------------------------------------------
+nse() { timeout 8 ip netns exec "$NS" "$@" 2>/dev/null; }
+jbool() { [ "$1" = "1" ] && printf 'true' || printf 'false'; }
+jstr() { printf '%s' "${1:-}" | tr -d '"\\' | tr -cd '[:print:]'; }
+
+# ---------- namespace and tunnel presence -----------------------------------
+ns_exists=0; [ -e "$NSPATH" ] && ns_exists=1
+
+wg_present=0; hs_epoch=0; rx=0; tx=0; endpoint=""
+if [ "$ns_exists" = 1 ] && nse wg show "$WG_IF" >/dev/null; then
+  wg_present=1
+  hs_epoch=$(nse wg show "$WG_IF" latest-handshakes | awk '{print $2; exit}')
+  read -r _ rx tx <<<"$(nse wg show "$WG_IF" transfer | head -1)"
+  endpoint=$(nse wg show "$WG_IF" endpoints | awk '{print $2; exit}')
+fi
+hs_epoch=${hs_epoch:-0}; rx=${rx:-0}; tx=${tx:-0}
+if [ "$hs_epoch" -gt 0 ] 2>/dev/null; then hs_age=$(( NOW - hs_epoch )); else hs_age=-1; fi
+
+# ---------- routing invariant: default must be the tunnel, never the veth ----
+def_dev=""; leak_path=0; default_present=0
+if [ "$ns_exists" = 1 ]; then
+  defroute=$(nse ip -4 route show default)
+  if [ -n "$defroute" ]; then
+    default_present=1
+    def_dev=$(printf '%s' "$defroute" | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+    # a default that leaves via the veth (or via the host end) is an ISP leak path
+    if [ "$def_dev" = "$VETH_NS" ] || printf '%s' "$defroute" | grep -q "$HOST_IP"; then
+      leak_path=1
+    fi
+  fi
+fi
+
+# ---------- is qBittorrent actually in the CURRENT namespace? ----------------
+qbit_pid=$(pgrep -x qbittorrent-nox | head -1)
+qbit_ns_ok=-1
+if [ -n "$qbit_pid" ] && [ "$ns_exists" = 1 ]; then
+  want=$(stat -Lc %i "$NSPATH" 2>/dev/null)
+  have=$(stat -Lc %i "/proc/$qbit_pid/ns/net" 2>/dev/null)
+  if [ -n "$want" ] && [ -n "$have" ]; then
+    [ "$want" = "$have" ] && qbit_ns_ok=1 || qbit_ns_ok=0
+  fi
+fi
+
+# ---------- WAN reachability, measured from the host (not the tunnel) --------
+lan_up=0; timeout 4 ping -c1 -W2 "$GW"  >/dev/null 2>&1 && lan_up=1
+wan_up=0; timeout 6 ping -c1 -W3 1.1.1.1 >/dev/null 2>&1 && wan_up=1
+[ "$wan_up" = 0 ] && timeout 6 ping -c1 -W3 9.9.9.9 >/dev/null 2>&1 && wan_up=1
+# ICMP can be filtered; a TCP handshake is a transit test that cannot be answered
+# from a DNS cache, so it stays honest when the WAN is actually down.
+if [ "$wan_up" = 0 ]; then
+  timeout 5 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null && wan_up=1
+fi
+dns_ok=0; timeout 5 getent hosts one.one.one.one >/dev/null 2>&1 && dns_ok=1
+res_up=0; timeout 4 ping -c1 -W2 "$RESOLVER" >/dev/null 2>&1 && res_up=1
+
+# ---------- public IP on each path, cached ----------------------------------
+# Cheap local signals above run every cycle; these two HTTPS calls do not.
+ip_vpn=""; ip_wan=""; egress_ts=0
+if [ -r "$CACHE" ]; then
+  . "$CACHE" 2>/dev/null || true
+  ip_vpn=${ip_vpn:-}; ip_wan=${ip_wan:-}; egress_ts=${egress_ts:-0}
+fi
+egress_fresh=0
+[ $(( NOW - egress_ts )) -lt "$EGRESS_TTL" ] && egress_fresh=1
+
+if [ "$egress_fresh" = 0 ] && [ "$wan_up" = 1 ]; then
+  fetch() { timeout 12 "$@" curl -fsS --max-time 10 https://ipinfo.io/ip 2>/dev/null \
+         || timeout 12 "$@" curl -fsS --max-time 10 https://icanhazip.com 2>/dev/null; }
+  new_vpn=$( [ "$wg_present" = 1 ] && fetch ip netns exec "$NS" | tr -dc '0-9.' )
+  new_wan=$( fetch | tr -dc '0-9.' )
+  if [ -n "$new_wan" ]; then
+    ip_vpn=$new_vpn; ip_wan=$new_wan; egress_ts=$NOW
+    umask 022
+    printf 'ip_vpn=%s\nip_wan=%s\negress_ts=%s\n' "$ip_vpn" "$ip_wan" "$egress_ts" > "$CACHE"
+  fi
+fi
+egress_age=-1
+[ "$egress_ts" -gt 0 ] 2>/dev/null && egress_age=$(( NOW - egress_ts ))
+
+# ---------- classify --------------------------------------------------------
+# Worst-first. "leak" outranks everything; wan_down never masks a leak.
+tunneled=-1
+if [ -n "$ip_vpn" ] && [ -n "$ip_wan" ]; then
+  [ "$ip_vpn" != "$ip_wan" ] && tunneled=1 || tunneled=0
+fi
+
+if   [ "$leak_path" = 1 ];                 then status=leak_route
+elif [ "$tunneled"  = 0 ];                 then status=leak
+elif [ "$ns_exists" = 0 ];                 then status=namespace_missing
+elif [ "$wg_present" = 0 ];                then status=tunnel_missing
+elif [ "$default_present" = 0 ];           then status=blocked
+elif [ "$qbit_ns_ok" = 0 ];                then status=orphaned
+elif [ "$wan_up" = 0 ];                    then status=wan_down
+elif [ "$hs_age" -gt 300 ] 2>/dev/null;    then status=tunnel_stale
+elif [ "$tunneled" = 1 ];                  then status=ok
+else                                            status=ok_unconfirmed
+fi
+
+# ok            - tunnel up, egress confirmed different from WAN
+# ok_unconfirmed- structurally correct, egress not yet confirmed this cycle
+# leak          - vpn and WAN report the same public IP
+# leak_route    - a default route via the veth exists: traffic can bypass PIA
+# blocked       - no default route in the namespace: fail-closed, torrents stalled
+# orphaned      - qBittorrent holds a stale namespace from a previous vpn-netns
+# tunnel_stale  - no handshake in >5 min while the WAN is up
+# wan_down      - no internet: tunnel state is a consequence, not a fault
+
+# ---------- emit ------------------------------------------------------------
+TMP=$(mktemp "$OUTDIR/.vpn.json.XXXXXX") || exit 1
+cat > "$TMP" <<JSON
+{
+  "ts": $NOW,
+  "status": "$(jstr "$status")",
+  "namespace_present": $(jbool "$ns_exists"),
+  "tunnel_present": $(jbool "$wg_present"),
+  "endpoint": "$(jstr "$endpoint")",
+  "handshake_age_s": $hs_age,
+  "rx_bytes": ${rx:-0},
+  "tx_bytes": ${tx:-0},
+  "default_route_dev": "$(jstr "$def_dev")",
+  "default_route_present": $(jbool "$default_present"),
+  "leak_route_present": $(jbool "$leak_path"),
+  "qbit_ns_ok": $qbit_ns_ok,
+  "qbit_running": $( [ -n "$qbit_pid" ] && printf 'true' || printf 'false' ),
+  "lan_up": $(jbool "$lan_up"),
+  "wan_up": $(jbool "$wan_up"),
+  "dns_ok": $(jbool "$dns_ok"),
+  "resolver_up": $(jbool "$res_up"),
+  "egress_ip_vpn": "$(jstr "$ip_vpn")",
+  "egress_ip_wan": "$(jstr "$ip_wan")",
+  "egress_age_s": $egress_age,
+  "tunneled": $tunneled
+}
+JSON
+chmod 644 "$TMP" && mv -f "$TMP" "$OUT"
+exit 0
+

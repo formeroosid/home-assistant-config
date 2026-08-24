@@ -49,6 +49,32 @@ if [ -n "$tmpd" ]; then
 else
   log "WARN: mktemp failed; skipped lumpy snapshot"
 fi
+# --- snapshot uther VPN monitor files (non-fatal if uther is unreachable) ----
+UTHER_HOST=uther
+UTHER_FILES="usr/local/sbin/ha-vpn-state etc/systemd/system/ha-vpn-state.service etc/systemd/system/ha-vpn-state.timer"
+
+install -d -m 755 deploy/uther
+tmpd=$(mktemp -d) || tmpd=""
+if [ -n "$tmpd" ]; then
+  if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
+       "$UTHER_HOST" "tar -cf - -C / $UTHER_FILES" 2>>"$LOG" \
+     | tar -xf - -C "$tmpd" 2>>"$LOG"; then
+    n=0
+    for p in $UTHER_FILES; do
+      if [ -f "$tmpd/$p" ]; then
+        install -m 644 "$tmpd/$p" "deploy/uther/$(basename "$p")"
+        n=$((n + 1))
+      fi
+    done
+    log "uther: snapshotted $n of 3 vpn files"
+    [ "$n" -eq 3 ] || log "WARN: uther returned only $n of 3 expected files"
+  else
+    log "WARN: could not pull vpn files from uther; keeping previous copies"
+  fi
+  rm -rf "$tmpd"
+else
+  log "WARN: mktemp failed; skipped uther snapshot"
+fi
 
 # --- snapshot lovelace dashboards out of .storage ----------------------------
 for f in "$CFG"/.storage/lovelace* ; do
