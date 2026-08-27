@@ -29,3 +29,5 @@ image/
 # Editor noise
 *.swp
 *~
+__pycache__/
+*.pyc
