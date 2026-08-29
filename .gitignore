@@ -31,3 +31,9 @@ image/
 *~
 __pycache__/
 *.pyc
+
+# HACS itself - 51 MB of frontend bundles, re-downloadable in one command.
+# Integrations HACS *installs* are deliberately NOT ignored - they stay
+# tracked, because the list of what is installed is what recovery needs.
+custom_components/hacs/
+
