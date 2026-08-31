@@ -1,0 +1,14 @@
+{
+  "data": {
+    "items": [
+      {
+        "id": "a13056d952b04a48963e15cd3abe571e",
+        "type": "module",
+        "url": "/hacsfiles/frigate-modern-hass-card/frigate-modern-hass-card.js?hacstag=1256395737110"
+      }
+    ]
+  },
+  "key": "lovelace_resources",
+  "minor_version": 1,
+  "version": 1
+}
