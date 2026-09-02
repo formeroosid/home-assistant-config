@@ -1,0 +1,243 @@
+#!/bin/bash
+# Verify each host's backup sentinel is recent AND that the volume backed up
+# has not collapsed. Emails on problems and publishes state for Home Assistant.
+#
+# Sentinel format v2 (line 2 optional, for compatibility with v1):
+#   2026-08-01T01:30:00-07:00
+#   bytes=24503001088
+#
+# Outputs:
+#   stdout                                  human report (captured by journald)
+#   $STATE_DIR/last_run                     plain-text heartbeat, survives HA outage
+#   /var/lib/ha-metrics/bkup_freshness.json picked up as extra.bkup_freshness by
+#                                           ha-metrics (it globs *.json and keys
+#                                           by filename - no collector edit needed)
+#   exit code                               0 all healthy, 1 one or more problems
+#
+# Revision history:
+#   2026-09-02  MAXAGE_HOURS 36 -> 26. At 36h a single missed daily run read as
+#               31h and passed as OK (larry, Sep 2; gussy, Aug 31). Sources back
+#               up at 01:00 and this check runs at 09:00, so healthy is 7-8h and
+#               one missed cycle is 31h. 26h detects a single miss on the next
+#               check instead of ~48h later.
+#   2026-09-02  Distinguish missing sentinel from unreachable host. Remote `cat`
+#               exited 1 on a missing file, so ssh returned 1 and every absent
+#               sentinel was misreported as UNREACHABLE; the NO SENTINEL branch
+#               was unreachable code.
+#   2026-09-02  Verify sendmail actually accepted the alert; log to syslog either
+#               way. Delivery failure was previously silent.
+#   2026-09-02  Write a heartbeat on every run so Home Assistant can alert when
+#               this checker itself stops running. Pull-based checks are silent
+#               when the checking host is down, and silence otherwise looks
+#               identical to "all healthy".
+#   2026-09-02  Guard divide-by-zero in the shrink percentage and reject
+#               future-dated sentinels (negative age passed as fresh).
+#   2026-09-02  Added ssh -n. Without it ssh inherits and consumes stdin, so
+#               piping this script into bash (e.g. `sed ... | bash`) made the
+#               first ssh swallow the remaining source and execution stopped
+#               silently with no output and no log lines.
+#   2026-09-02  Publish structured per-source state as JSON for ha-metrics.
+
+set -uo pipefail
+
+MAXAGE_HOURS=26                   # daily sources: healthy 7-8h, one miss 31h
+DROP_PCT=60                       # alert if current < DROP_PCT% of high-water mark
+STATE_DIR="/var/lib/bkup-freshness"
+HA_DIR="/var/lib/ha-metrics"      # ha-metrics globs *.json here; hamon must read it
+MAIL_TO="jamie@jamiegordon.net"
+MAIL_FROM="mcguffin@swampcastle.biz"
+BASE="/srv/whitey-r6/Workstations/MyStash"
+HOSTS="larry gussy krizzy gdrive"
+
+# Remote exit code meaning "connected fine, but the sentinel file is absent".
+# Chosen to avoid collision with ssh's own codes (255) and common shell codes.
+RC_NO_SENTINEL=42
+
+path_for() {
+  case "$1" in
+    larry)  echo "$BASE/jgordon/larry" ;;
+    gussy)  echo "$BASE/jgordon/gussy" ;;
+    krizzy) echo "$BASE/christy/Krizzybkup" ;;
+    gdrive) echo "$BASE/jgordon/GburgClone" ;;
+  esac
+}
+
+human() {
+  awk -v b="$1" 'BEGIN{
+    split("B KB MB GB TB",u," "); i=1
+    while (b>=1024 && i<5) { b/=1024; i++ }
+    printf (i==1 ? "%d%s" : "%.2f%s"), b, u[i]
+  }'
+}
+
+# Minimal JSON string escaping, same approach as ha-metrics' j_str.
+j_str() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+
+mkdir -p "$STATE_DIR"
+
+NOW=$(date +%s)
+REPORT=""
+SOURCES_JSON=""
+FAIL=0
+FAILED_N=0
+
+# record <source> <status> <age_hours|null> <bytes|null> <human text>
+# Keeps the text report and the machine-readable state in lockstep so the two
+# can never disagree about what was found.
+record() {
+  local name="$1" status="$2" age="${3:-null}" bytes="${4:-null}" text="$5"
+  REPORT+="$text"$'\n'
+  SOURCES_JSON="${SOURCES_JSON}${SOURCES_JSON:+,}"
+  SOURCES_JSON="${SOURCES_JSON}{\"source\":\"$(j_str "$name")\""
+  SOURCES_JSON="${SOURCES_JSON},\"status\":\"$(j_str "$status")\""
+  SOURCES_JSON="${SOURCES_JSON},\"age_hours\":${age},\"bytes\":${bytes}}"
+  case "$status" in
+    OK) ;;
+    *) FAIL=1; FAILED_N=$(( FAILED_N + 1 )) ;;
+  esac
+}
+
+for h in $HOSTS; do
+  p=$(path_for "$h")
+
+  # `[ -f ] || exit 42` separates "file missing" from "ssh/host problem" so a
+  # never-completed backup is not reported as a network failure.
+  # -n redirects ssh's stdin from /dev/null so it cannot consume the loop's
+  # input or this script's own source when piped.
+  raw=$(ssh -n -o BatchMode=yes -o ConnectTimeout=15 jgordon@whitey \
+        "[ -f '$p/.last_backup' ] || exit $RC_NO_SENTINEL; cat '$p/.last_backup'" 2>/dev/null)
+  ssh_rc=$?
+
+  if [ "$ssh_rc" -eq "$RC_NO_SENTINEL" ]; then
+    record "$h" NO_SENTINEL null null \
+      "$h: NO SENTINEL - never completed ($p/.last_backup absent)"
+    continue
+  elif [ "$ssh_rc" -ne 0 ]; then
+    record "$h" UNREACHABLE null null \
+      "$h: UNREACHABLE - ssh to whitey failed (rc=$ssh_rc)"
+    continue
+  elif [ -z "$raw" ]; then
+    record "$h" EMPTY_SENTINEL null null \
+      "$h: EMPTY SENTINEL - zero-length file, backup did not finish"
+    continue
+  fi
+
+  # ---- line 1: timestamp (unchanged from v1) ----
+  ts_line=$(printf '%s\n' "$raw" | head -1)
+  then_ts=$(date -d "$ts_line" +%s 2>/dev/null || echo 0)
+  if [ "$then_ts" -eq 0 ]; then
+    record "$h" UNPARSEABLE null null "$h: UNPARSEABLE sentinel: $ts_line"
+    continue
+  fi
+
+  # A future timestamp yields a negative age, which silently passes the -gt
+  # staleness test and would read as fresh indefinitely.
+  if [ "$then_ts" -gt "$NOW" ]; then
+    record "$h" FUTURE_TS null null \
+      "$h: FUTURE TIMESTAMP - sentinel dated $ts_line (clock skew?)"
+    continue
+  fi
+
+  age_h=$(( (NOW - then_ts) / 3600 ))
+  if [ "$age_h" -gt "$MAXAGE_HOURS" ]; then
+    record "$h" STALE "$age_h" null \
+      "$h: STALE - last completed ${age_h}h ago, limit ${MAXAGE_HOURS}h ($ts_line)"
+    continue
+  fi
+
+  # ---- line 2: bytes= (absent on v1 sentinels) ----
+  bytes=$(printf '%s\n' "$raw" | sed -n 's/^bytes=\([0-9][0-9]*\)$/\1/p' | head -1)
+
+  if [ -z "$bytes" ]; then
+    record "$h" OK "$age_h" null \
+      "$h: OK - ${age_h}h ago (no byte count - legacy sentinel)"
+    continue
+  fi
+
+  state="$STATE_DIR/$h.bytes"
+  hwm=0
+  [ -f "$state" ] && hwm=$(cat "$state" 2>/dev/null)
+  case "$hwm" in ''|*[!0-9]*) hwm=0 ;; esac
+
+  if [ "$hwm" -eq 0 ]; then
+    echo "$bytes" > "$state"
+    record "$h" OK "$age_h" "$bytes" \
+      "$h: OK - ${age_h}h ago, $(human "$bytes") (baseline recorded)"
+    continue
+  fi
+
+  # integer compare without overflow: bytes*100 vs hwm*DROP_PCT
+  if [ $(( bytes / 100 )) -lt $(( hwm / 100 * DROP_PCT / 100 )) ]; then
+    # hwm/100 is the divisor below; guard the degenerate small-hwm case.
+    if [ "$hwm" -ge 100 ]; then
+      pct=$(( bytes / (hwm / 100) ))
+    else
+      pct=0
+    fi
+    record "$h" SHRANK "$age_h" "$bytes" \
+      "$h: SHRANK - $(human "$bytes") is ${pct}% of high-water $(human "$hwm")
+       (if this drop is intentional: rm $state)"
+    continue
+  fi
+
+  if [ "$bytes" -gt "$hwm" ]; then
+    echo "$bytes" > "$state"
+  fi
+  record "$h" OK "$age_h" "$bytes" "$h: OK - ${age_h}h ago, $(human "$bytes")"
+done
+
+echo "$REPORT"
+
+# --- heartbeat, written unconditionally --------------------------------------
+# This check is pull-based on uther, so if uther is down or the timer is masked
+# the result is silence - which otherwise looks identical to "all healthy".
+# Home Assistant watches the age of this state and alerts if it goes stale.
+{
+  printf 'last_run=%s\n'     "$(date -Is)"
+  printf 'epoch=%s\n'        "$NOW"
+  printf 'fail=%s\n'         "$FAIL"
+  printf 'failed_sources=%s\n' "$FAILED_N"
+  printf 'maxage_hours=%s\n' "$MAXAGE_HOURS"
+} > "$STATE_DIR/last_run.tmp" && mv -f "$STATE_DIR/last_run.tmp" "$STATE_DIR/last_run"
+
+# --- publish to ha-metrics ---------------------------------------------------
+# ha-metrics globs /var/lib/ha-metrics/*.json, keys by basename, and skips any
+# file whose body is not {...}, so this lands as extra.bkup_freshness with no
+# collector change. The temp file is hidden AND does not end in .json, so a
+# half-written file can never be slurped mid-write (same trick as vpn.json).
+if [ -d "$HA_DIR" ]; then
+  ha_tmp=$(mktemp "$HA_DIR/.bkup_freshness.json.XXXXXX" 2>/dev/null) || ha_tmp=""
+  if [ -n "$ha_tmp" ]; then
+    printf '{"ts":"%s","epoch":%s,"fail":%s,"failed_sources":%s,"maxage_hours":%s,"sources":[%s]}\n' \
+      "$(date -Is)" "$NOW" "$FAIL" "$FAILED_N" "$MAXAGE_HOURS" "$SOURCES_JSON" > "$ha_tmp"
+    # hamon (the account HA connects as) must be able to read it, or the sensor
+    # stays empty no matter how correct the JSON is.
+    chmod 0644 "$ha_tmp"
+    mv -f "$ha_tmp" "$HA_DIR/bkup_freshness.json"
+  else
+    logger -t bkup-freshness "WARNING: could not write state to $HA_DIR (HA sensor will go stale)"
+  fi
+else
+  logger -t bkup-freshness "WARNING: $HA_DIR missing; skipping HA state publish"
+fi
+
+# --- alert -------------------------------------------------------------------
+if [ "$FAIL" -ne 0 ]; then
+  mail_out=$(printf 'From: %s\nTo: %s\nSubject: BACKUP CHECK FAILED\n\n%s\n' \
+    "$MAIL_FROM" "$MAIL_TO" "Checked: $(date -Is)
+
+$REPORT" | /usr/sbin/sendmail -t -oi 2>&1)
+  mail_rc=$?
+
+  if [ "$mail_rc" -eq 0 ]; then
+    logger -t bkup-freshness "backup check failed ($FAILED_N source/s); alert mailed to $MAIL_TO"
+  else
+    # Do not lose the finding just because the transport broke. syslog is local
+    # and survives a dead relay.
+    logger -t bkup-freshness \
+      "CRITICAL: backup check failed AND sendmail failed (rc=$mail_rc): ${mail_out:-no output}"
+    logger -t bkup-freshness "undelivered report: $(printf '%s' "$REPORT" | tr '\n' '; ')"
+  fi
+fi
+
+exit $FAIL

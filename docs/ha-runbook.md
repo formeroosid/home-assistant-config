@@ -639,6 +639,103 @@ Port 8971 defaults to **TLS with a self-signed certificate**, which Home Assista
 
 ---
 
+## 4e. Backup freshness checker (uther)
+
+Second-opinion monitoring for the workstation backups. `bkup-freshness` runs on **uther** and reads the sentinel files that each source writes on **whitey**, so the host that stores the backups is not the host that judges them. Built 2026-08-06; patched and wired into HA 2026-09-02 after it missed a real outage.
+
+### Why it lives on uther
+
+Whitey is the backup target. A freshness check running there would be reporting on its own storage, and a whitey outage would take the alarm down with the thing it is meant to alarm about. Uther already runs the mail relay, so it can raise an alert without depending on whitey at all. Same separation principle as §4b: the observer is not the actor.
+
+### Sentinel layout
+
+Each source writes `.last_backup` at the top of its own tree under `/srv/whitey-r6/Workstations/MyStash`. Format v2 is two lines: an ISO-8601 timestamp, then `bytes=N`.
+
+| Source | Sentinel path (under `MyStash/`) |
+| :---- | :---- |
+| larry | `jgordon/larry/.last_backup` |
+| gussy | `jgordon/gussy/.last_backup` |
+| krizzy | `christy/Krizzybkup/.last_backup` |
+| gdrive | `jgordon/GburgClone/.last_backup` |
+
+> **krizzy is not under `jgordon/`.** It sits in Christy's tree with a different directory name. Auditing `jgordon/*` and concluding krizzy is missing is a mistake this runbook has already made once.
+
+### Files
+
+| Path | Host | Purpose |
+| :---- | :---- | :---- |
+| `/usr/local/sbin/bkup-freshness` | uther | the checker |
+| `/etc/systemd/system/bkup-freshness.{service,timer}` | uther | daily at 09:00 |
+| `/var/lib/bkup-freshness/<host>.bytes` | uther | size high-water marks |
+| `/var/lib/bkup-freshness/last_run` | uther | heartbeat, written unconditionally |
+| `/var/lib/ha-metrics/bkup_freshness.json` | uther | HA payload, 644 |
+| `deploy/uther/bkup-freshness` | git | tracked copy |
+| `packages/bkup_freshness.yaml` | git = `/config/packages/` | HA sensors and automations |
+
+### The 36-hour gap (the reason for the patch)
+
+Sources back up at **01:00**; the check runs at **09:00**. A healthy source therefore reads 7–8 h old, and one entirely missed cycle reads **31 h**. With the original `MAXAGE_HOURS=36`, a missed night passed as **OK** and only tripped at the *following* day's check, roughly 55 h after the last good backup.
+
+That is not theoretical. Larry's 01:00 run failed on **2026-09-02**; the 09:00 check logged `larry OK - 31h ago` and sent nothing. Gussy's miss on 2026-08-30 passed the same way at 32 h.
+
+`MAXAGE_HOURS=26` closes it: 8 h healthy is comfortably inside, 31 h is outside, and the alert lands the same morning.
+
+> Choosing the threshold is choosing how long a failure may stay silent. It must sit between the healthy age and the healthy age plus one interval — not at a round number.
+
+### What triggered the failure
+
+Whitey's ED25519 host key was regenerated around **2026-09-01** (rebuild during the storage migration). Larry's `known_hosts` still held the old key, so the next scheduled `larry_bkup.sh` hit `REMOTE HOST IDENTIFICATION HAS CHANGED`. Because the script uses `BatchMode=yes`, rsync did not prompt — it died instantly. One night lost.
+
+**Post-rebuild checklist:** after regenerating any host's SSH keys, refresh `known_hosts` on every host that connects *to* it, including root's, before the next scheduled window. Every `BatchMode=yes` job pointed at that host is broken until you do, and it fails without prompting.
+
+### Statuses
+
+`OK`, `STALE`, `NO_SENTINEL`, `EMPTY_SENTINEL`, `UNREACHABLE`, `UNPARSEABLE`, `FUTURE_TS`, `SHRANK`.
+
+The patch added the four in the middle. Previously a **missing** sentinel reported `UNREACHABLE rc=1`, because `cat` of a nonexistent file and a dead SSH connection both return non-zero and were not distinguished — the `NO_SENTINEL` branch existed but was unreachable dead code. A missing sentinel and an unreachable host need different responses, so they need different words. `test -f` now runs before the `cat`.
+
+`FUTURE_TS` guards a clock-skew case where a timestamp ahead of now produced a *negative* age, which compared as fresher than anything and would have read healthy forever.
+
+`SHRANK` fires when a backup drops below `DROP_PCT=60` of its recorded high-water mark — a backup that runs, succeeds, and copies almost nothing.
+
+### How it reaches Home Assistant
+
+Same mechanism as §4b, and for the same reason no collector change was needed: `ha-metrics`' `extra{}` block globs `/var/lib/ha-metrics/*.json` and keys by basename, so writing `bkup_freshness.json` surfaced it as `extra.bkup_freshness`. Consumed through `sensor.uther_metrics` (`name: Uther Metrics` in `packages/homelab_nodes.yaml`, whose `json_attributes` anchor already lists `extra`).
+
+The atomic temp file is `.bkup_freshness.json.XXXXXX` — leading dot **and** not ending in `.json`, so a half-written file cannot be picked up mid-write. Preserve both properties.
+
+### Dead man's switch
+
+A checker that stops running is indistinguishable from a checker reporting all-clear, and the silent-failure mode is the one that actually bit. So the JSON carries its own `epoch`, and `binary_sensor.backup_monitor_stale` reports a problem when that timestamp ages past `maxage_hours + 4` (30 h) — **and when the attribute is missing entirely**, rather than going `unavailable` and quietly dropping off the dashboard. Absent evidence is a fault, not a blank.
+
+`delay_on: 45m` absorbs restarts and the collector's 60 s scan interval.
+
+This is distinct from the existing **Oldest Backup Age** sensor, which reads whitey's own `sentinels[]`. That one measures file ages directly; these report the independent checker's verdict and whether the checker is alive.
+
+### Alert path
+
+Non-zero exit mails a report through uther's Postfix relay: `mcguffin@swampcastle.biz` → `jamie@jamiegordon.net`, filed by Gmail under `SwampCastle/Whitey/Uther`. Proven end-to-end 2026-09-02 with three synthetic STALE sources. `sendmail`'s return code is now checked, and on failure the undelivered report body is dumped to syslog — an alerting path that fails silently is worse than none.
+
+### Verification
+
+```shell
+# is the patched version installed?
+grep -c bkup_freshness.json /usr/local/sbin/bkup-freshness    # 0 = old version
+
+sudo /usr/local/sbin/bkup-freshness; echo "EXIT=$?"           # 0 healthy, 1 alerted
+python3 -m json.tool /var/lib/ha-metrics/bkup_freshness.json
+cat /var/lib/bkup-freshness/last_run
+systemctl list-timers bkup-freshness.timer --no-pager
+```
+
+To exercise the alert without waiting for a real failure, run with a deliberately tiny threshold: `sudo MAXAGE_HOURS=1 /usr/local/sbin/bkup-freshness`. Expect three or four STALE lines, exit 1, and mail.
+
+> **Do not test by piping a stream into `bash`.** `ssh` inherits stdin and swallows the rest of the script, so the run ends after the first remote command with **no output and nothing in the journal** — it looks like the script did nothing. Fixed permanently with `ssh -n`, but the trap applies to any script that pipes into a shell. Write to a temp file and run it.
+
+> `journalctl -u bkup-freshness` prints `-- No entries --` for a user outside `adm`/`systemd-journal`, which reads identically to "the unit never ran".
+
+---
+
 ## 5\. HA entities
 
 Defined in `config/packages/homelab_nodes.yaml`.
@@ -894,6 +991,13 @@ As of 2026-08-20 this returns only `MAIL_TO`, `MAIL_FROM`, and `RELAY_HOST=jgord
 | `mosquitto_sub: command not found` on whitey | The clients are not installed on the host — only inside the container image | Run them from the image with `docker run --rm --network host eclipse-mosquitto:2 mosquitto_sub …`. Avoids installing `mosquitto-clients` and any chance of a second broker on the host |
 | Searching "frigate" returned "No integrations found" | The search box on the **HACS entry page** under Settings → Devices & Services filters HACS's own config entries, not the HACS store | Browse from the **HACS panel in the sidebar** (or `/hacs` directly) |
 | Frigate absent from the Add Integration list after downloading it | HACS only copies code into `custom_components/`; it configures nothing | Restart Home Assistant, then add the integration |
+| Larry's backup silently missed a night; `bkup-freshness` reported `larry OK - 31h ago` and sent nothing | **Threshold larger than one full interval.** Sources run 01:00, check runs 09:00, so healthy is 7-8 h and one missed cycle is 31 h — under `MAXAGE_HOURS=36`, so it passed. Gussy's 2026-08-30 miss passed the same way at 32 h. | `MAXAGE_HOURS=26`. A threshold must fall between the healthy age and healthy plus one interval. See §4e |
+| `REMOTE HOST IDENTIFICATION HAS CHANGED` broke larry's nightly rsync with no prompt and no retry | Whitey's ED25519 host key was regenerated ~2026-09-01 during the storage migration. `larry_bkup.sh` uses `BatchMode=yes`, so ssh refused rather than asking. | Refresh `known_hosts` on **every** host that connects to a rebuilt host, root's included, before the next scheduled window. See the checklist in §4e |
+| Ten nights of cron `(CMD)` lines were read as ten silent backup failures | **A cron invocation log proves the job started, not that it succeeded.** Uther's journal showed `larry OK - 7h ago` every night Aug 23 - Sep 1; the real outage was one night. | Confirm outcome from the sentinel or checker history, never from invocation logs |
+| krizzy appeared to have no sentinel | Its tree is `christy/Krizzybkup/`, not under `jgordon/`. The audit only globbed `jgordon/*`. | See the sentinel table in §4e |
+| `sed ... \| bash` produced no output at all and left an empty journal | **`ssh` inherited stdin and consumed the rest of the script.** The run ended after the first remote command, indistinguishable from never running. | `ssh -n` in any script that may be piped into a shell; or write to a temp file and execute that |
+| `diff ... \| vim -` opened an empty vim screen instead of an error | vim clears the screen and hides the upstream `No such file or directory` on stderr | Use `vimdiff a b`, or redirect to a file and inspect the exit status |
+| `journalctl -u <unit>` showed `-- No entries --` for a unit that had run | Caller not in `adm` or `systemd-journal` | Add the user to both; takes effect at next login. Until then use `sudo journalctl` |
 
 ---
 
@@ -906,7 +1010,7 @@ As of 2026-08-20 this returns only `MAIL_TO`, `MAIL_FROM`, and `RELAY_HOST=jgord
 5. **Notifications.** The Attention card logic should become automations that push on node-unreachable (10+ min), stale backup, degraded RAID, stopped container, and filesystem over 85%. Local push via the companion app works without internet.  
 6. **~~VPN egress verification on uther.~~** **Done 2026-08-24** — see §4b. Implemented as a standalone read-only `ha-vpn-state` collector on its own timer, *not* by extending `pia-refresh-wireguard` as originally planned: that script is a remediator and observation must not be able to trigger remediation. Remaining follow-ups: require a bad state to persist across two samples before alerting (see the PIA-refresh overlap note in §4b), and decide what to do about the deliberate DNS asymmetry.  
 7. **Offsite backup strategy.** Broader household decision; see §3.  
-8. **Add an HA sentinel to uther's backup freshness checker** so HA backups are watched from outside whitey too.  
+8. **~~Add an HA sentinel to uther's backup freshness checker~~** — **partly done 2026-09-02**, see §4e. The checker now publishes to HA and has a dead man's switch. Still outstanding: HA's *own* backups are not yet among the four watched sources, so they remain unwatched from outside whitey.  
 9. **AsusWRT integration** for gilbert — WAN state, client list, presence.  
 10. **Distinguish host-down from SSH-broken** with a ping check per node.  
 11. **ratgdo32 purchase and install** — needs the opener learn-button colour.  
@@ -915,6 +1019,12 @@ As of 2026-08-20 this returns only `MAIL_TO`, `MAIL_FROM`, and `RELAY_HOST=jgord
 14. **Finish the Frigate surface.** Add `media_source:` for the Media Browser, install Advanced Camera Card for scrubbable live views, and import the Frigate notification blueprint. Item 5 above now has a working event source for camera alerts.  
 15. **Decide on broker transport security.** 1883 is cleartext on the LAN by design — both clients are wired hosts on the same segment and TLS would add certificate lifecycle to a path that currently has none. Revisit if any wireless or off-segment client (a BLE proxy, an ESPHome node) starts publishing.  
 16. **Confirm the Mosquitto password file is recoverable, not backed up.** It is deliberately gitignored and lives outside `/config`, so no backup covers it. That is acceptable only while both broker passwords are in 1Password — verify they are, and that §4c's two-command rebuild is accurate.
+17. **Add `bkup-freshness` and its two units to the uther snapshot in `ha-config-commit`.** `UTHER_FILES` currently lists only the three `ha-vpn-state` files, so the checker is not auto-mirrored. Add it **only after** the patched script is installed on uther — the snapshot copies uther's version *over* the git copy, so doing it first would revert the patch. Bump the `$n -eq 3` expected-count check at the same time.  
+18. **`ha-config-commit` never pulls.** It commits and pushes but has no `git pull`, so a commit made on GitHub directly leaves whitey behind, and whitey's next push then fails with only a `WARN: push failed, commit is local only` line in `/var/log/ha_bkup/ha-config-commit.log`. Nothing on the dashboard shows this. Either add `git pull --ff-only` before the snapshot, or surface push failure as an alert.  
+19. **Retire `/usr/local/sbin/bkup-freshness.v1` and `.bak-2026-08-06`.** Both are still executable and one tab-completion away from being run by hand. Delete them; git is the history.  
+20. **Normalize krizzy's sentinel timestamp** to `date -Is` output. It writes `-0700` rather than `-07:00`, which GNU `date` tolerates today but is not RFC 3339.  
+21. **Fix larry's directory mode on whitey.** `drwxr-x--x+` where its siblings are `drwxrws---` — missing setgid and group-write. Unexplained; make it match before it causes a permissions surprise.  
+22. **Consider converting larry's backup from cron to a systemd timer** with `Persistent=true`, for catch-up after downtime and for journal history. Cron gave us an invocation line and nothing else, which is exactly what made this outage hard to read.
 
 ---
 
