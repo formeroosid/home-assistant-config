@@ -1,0 +1,205 @@
+# Home Assistant package: backup freshness + monitor heartbeat
+#
+# Tracked in this repo at packages/bkup_freshness.yaml, which is /config/packages/
+# on whitey. configuration.yaml already has `packages: !include_dir_named packages`,
+# so this file is live after a pull plus a template/config reload.
+#
+# Companion script: deploy/uther/bkup-freshness -> /usr/local/sbin/bkup-freshness
+#
+# Data source: uther's bkup-freshness writes /var/lib/ha-metrics/bkup_freshness.json,
+# which ha-metrics picks up automatically into extra.bkup_freshness (it globs
+# *.json and keys by basename). No collector change was needed.
+#
+# JSON shape published by bkup-freshness:
+#   {"ts":"2026-09-02T09:00:02-07:00","epoch":1788...,"fail":0,"failed_sources":0,
+#    "maxage_hours":26,
+#    "sources":[{"source":"larry","status":"OK","age_hours":7,"bytes":142000000000}, ...]}
+#
+# Entity id sensor.uther_metrics comes from `name: Uther Metrics` in
+# packages/homelab_nodes.yaml, whose json_attributes anchor already includes
+# `extra` - verified, not assumed.
+#
+# Complements the existing "Oldest Backup Age" sensor, which reads whitey's own
+# sentinels[] attribute. That one reports raw file ages; these report the
+# independent checker's verdict plus whether the checker itself is still alive.
+
+template:
+  - sensor:
+      # ---- when the checker last completed, regardless of outcome ----------
+      - name: "Backup Check Last Run"
+        unique_id: bkup_freshness_last_run
+        device_class: timestamp
+        icon: mdi:clock-check-outline
+        availability: >
+          {{ state_attr('sensor.uther_metrics', 'extra') is mapping
+             and state_attr('sensor.uther_metrics', 'extra').get('bkup_freshness') is mapping }}
+        state: >
+          {{ state_attr('sensor.uther_metrics', 'extra')['bkup_freshness']['ts'] }}
+
+      # ---- age of that heartbeat, in hours ---------------------------------
+      - name: "Backup Check Age"
+        unique_id: bkup_freshness_age_hours
+        unit_of_measurement: "h"
+        state_class: measurement
+        icon: mdi:timer-sand
+        availability: >
+          {{ state_attr('sensor.uther_metrics', 'extra') is mapping
+             and state_attr('sensor.uther_metrics', 'extra').get('bkup_freshness') is mapping }}
+        state: >
+          {% set b = state_attr('sensor.uther_metrics', 'extra')['bkup_freshness'] %}
+          {{ ((as_timestamp(now()) - (b.epoch | int)) / 3600) | round(1) }}
+
+      # ---- rollup of source health, with detail in attributes -------------
+      - name: "Backup Sources"
+        unique_id: bkup_freshness_sources
+        icon: mdi:database-check-outline
+        availability: >
+          {{ state_attr('sensor.uther_metrics', 'extra') is mapping
+             and state_attr('sensor.uther_metrics', 'extra').get('bkup_freshness') is mapping }}
+        state: >
+          {% set b = state_attr('sensor.uther_metrics', 'extra')['bkup_freshness'] %}
+          {% set bad = b.sources | rejectattr('status', 'eq', 'OK') | list %}
+          {{ 'OK' if bad | count == 0 else bad | count ~ ' problem' ~ ('' if bad | count == 1 else 's') }}
+        attributes:
+          failed_sources: >
+            {% set b = state_attr('sensor.uther_metrics', 'extra')['bkup_freshness'] %}
+            {{ b.sources | rejectattr('status', 'eq', 'OK')
+                         | map(attribute='source') | list | join(', ') }}
+          detail: >
+            {% set b = state_attr('sensor.uther_metrics', 'extra')['bkup_freshness'] %}
+            {%- for s in b.sources %}{{ s.source }}={{ s.status }}{{ ' ' if not loop.last }}{% endfor %}
+          maxage_hours: >
+            {{ state_attr('sensor.uther_metrics', 'extra')['bkup_freshness']['maxage_hours'] }}
+
+  - binary_sensor:
+      # ---- a backup source is stale/missing/shrunk -------------------------
+      # Mirrors the mail alert, so the dashboard and the inbox agree.
+      - name: "Backup Sources Problem"
+        unique_id: bkup_freshness_sources_problem
+        device_class: problem
+        icon: mdi:database-alert-outline
+        delay_on: "00:05:00"          # debounce a single bad poll
+        availability: >
+          {{ state_attr('sensor.uther_metrics', 'extra') is mapping
+             and state_attr('sensor.uther_metrics', 'extra').get('bkup_freshness') is mapping }}
+        state: >
+          {{ (state_attr('sensor.uther_metrics', 'extra')['bkup_freshness']['fail'] | int) > 0 }}
+
+      # ---- DEAD MAN'S SWITCH ----------------------------------------------
+      # The checker is pull-based on uther. If uther is down, the timer is
+      # masked, or the script dies before publishing, nothing is written and
+      # the result is silence - which otherwise looks exactly like "healthy".
+      # This turns that silence into an alert.
+      #
+      # Deliberately reports a PROBLEM when the attribute is missing entirely,
+      # rather than going unavailable. Absence of evidence is the failure mode
+      # we are trying to catch, so it must not be modelled as "unknown".
+      - name: "Backup Monitor Stale"
+        unique_id: bkup_freshness_monitor_stale
+        device_class: problem
+        icon: mdi:heart-broken-outline
+        delay_on: "00:45:00"          # tolerate restarts and polling gaps
+        state: >
+          {% set e = state_attr('sensor.uther_metrics', 'extra') %}
+          {% if e is not mapping or e.get('bkup_freshness') is not mapping %}
+            {{ true }}
+          {% else %}
+            {% set b = e['bkup_freshness'] %}
+            {% set age_h = (as_timestamp(now()) - (b.epoch | int)) / 3600 %}
+            {{ age_h > ((b.maxage_hours | int) + 4) }}
+          {% endif %}
+        attributes:
+          reason: >
+            {% set e = state_attr('sensor.uther_metrics', 'extra') %}
+            {% if e is not mapping %}
+              uther metrics sensor reported no data (uther down or ha-metrics failing?)
+            {% elif e.get('bkup_freshness') is not mapping %}
+              bkup_freshness.json absent on uther (timer masked, or script failing early?)
+            {% else %}
+              {% set b = e['bkup_freshness'] %}
+              last run {{ ((as_timestamp(now()) - (b.epoch | int)) / 3600) | round(1) }}h ago
+            {% endif %}
+
+automation:
+  # ---- source failure: matches the email, keeps a local record -------------
+  - id: bkup_sources_problem_notify
+    alias: "Backup: source problem"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.backup_sources_problem
+        to: "on"
+    actions:
+      - action: persistent_notification.create
+        data:
+          notification_id: bkup_sources_problem
+          title: "Backup source problem"
+          message: >
+            {{ state_attr('sensor.backup_sources', 'failed_sources') }} failing.
+            Detail: {{ state_attr('sensor.backup_sources', 'detail') }}.
+            Checked {{ states('sensor.backup_check_age') }}h ago.
+
+  - id: bkup_sources_problem_clear
+    alias: "Backup: source problem cleared"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.backup_sources_problem
+        to: "off"
+    actions:
+      - action: persistent_notification.dismiss
+        data:
+          notification_id: bkup_sources_problem
+
+  # ---- the monitor itself went quiet --------------------------------------
+  # This is the alert that would have caught the Sep 2 incident class early.
+  - id: bkup_monitor_stale_notify
+    alias: "Backup: monitor stale (dead man's switch)"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.backup_monitor_stale
+        to: "on"
+    actions:
+      - action: persistent_notification.create
+        data:
+          notification_id: bkup_monitor_stale
+          title: "Backup monitoring has gone quiet"
+          message: >
+            No fresh result from uther's bkup-freshness.
+            Reason: {{ state_attr('binary_sensor.backup_monitor_stale', 'reason') }}.
+            Backup state is UNKNOWN, not healthy.
+            Check: systemctl list-timers | grep bkup on uther.
+
+  - id: bkup_monitor_stale_clear
+    alias: "Backup: monitor recovered"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.backup_monitor_stale
+        to: "off"
+    actions:
+      - action: persistent_notification.dismiss
+        data:
+          notification_id: bkup_monitor_stale
+
+# -----------------------------------------------------------------------------
+# Optional dashboard card for the Homelab view. Add via the Lovelace raw editor;
+# it is not part of the package YAML above.
+#
+# type: markdown
+# title: Backups
+# content: |
+#   {% set b = state_attr('sensor.uther_metrics','extra')['bkup_freshness']
+#              if state_attr('sensor.uther_metrics','extra') is mapping else none %}
+#   {% if b is none %}
+#   **Backup state unknown** - no data from uther
+#   {% else %}
+#   {% for s in b.sources %}
+#   {{ '✅' if s.status == 'OK' else '❌' }} **{{ s.source }}** -
+#   {{ s.status }}{% if s.age_hours is not none %}, {{ s.age_hours }}h ago{% endif %}
+#   {% endfor %}
+#
+#   _Checked {{ states('sensor.backup_check_age') }}h ago, limit {{ b.maxage_hours }}h_
+#   {% endif %}
+# -----------------------------------------------------------------------------
