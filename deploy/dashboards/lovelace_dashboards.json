@@ -18,6 +18,15 @@
         "show_in_sidebar": true,
         "title": "Homelab",
         "url_path": "dashboard-homelab"
+      },
+      {
+        "icon": "mdi:television",
+        "id": "dashboard_sonarr",
+        "mode": "storage",
+        "require_admin": false,
+        "show_in_sidebar": true,
+        "title": "Sonarr",
+        "url_path": "dashboard-sonarr"
       }
     ]
   },

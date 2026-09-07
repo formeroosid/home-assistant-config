@@ -1,0 +1,46 @@
+{
+  "views": [
+    {
+      "cards": [
+        {
+          "cards": [
+            {
+              "cards": [
+                {
+                  "entity": "sensor.sonarr_upcoming",
+                  "icon": "mdi:calendar-clock",
+                  "name": "Upcoming",
+                  "type": "tile"
+                },
+                {
+                  "entity": "sensor.sonarr_wanted",
+                  "icon": "mdi:alert-circle-outline",
+                  "name": "Wanted",
+                  "type": "tile"
+                },
+                {
+                  "entity": "sensor.sonarr_queue",
+                  "icon": "mdi:download-network",
+                  "name": "Active Queue",
+                  "type": "tile"
+                }
+              ],
+              "type": "horizontal-stack"
+            },
+            {
+              "entities": [
+                "calendar.sonarr"
+              ],
+              "initial_view": "listWeek",
+              "name": "Upcoming Episodes Schedule",
+              "type": "calendar"
+            }
+          ],
+          "type": "vertical-stack"
+        }
+      ],
+      "path": "sonarr",
+      "title": "Sonarr"
+    }
+  ]
+}
