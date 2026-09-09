@@ -7,9 +7,18 @@
  * always-visible compact latest event, camera entity picker in editor.
  * ---------------------------------------------------------------
  */
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const CARD_TAG = 'frigate-modern-hass-card';
 const DAY = 86400;
+// Smallest tile width the automatic grid will produce, in px. Below this a
+// camera stops being watchable, so fewer columns are used instead.
+// Narrowest a grid tile may be before a column is dropped. Only a readability
+// floor: on a phone the stack_on_mobile setting decides, not this number.
+const MIN_TILE_PX = 200;
+// A card narrower than this is a phone as far as the grid is concerned. Chosen
+// so every phone falls under it: an Android phone is 412 CSS px wide, the
+// largest iPhone 430.
+const PHONE_PX = 500;
 const DEFAULT_ROTATE_S = 30;   // seconds used when rotate_seconds=0 and user enables rotation
 
 const ICONS = {
@@ -31,6 +40,10 @@ const ICONS = {
   rotate:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 6v3l4-4-4-4v3c-4.42 0-8 3.58-8 8 0 1.57.46 3.03 1.24 4.26L6.7 14.8A5.87 5.87 0 0 1 6 12c0-3.31 2.69-6 6-6zm6.76 1.74L17.3 9.2A5.87 5.87 0 0 1 18 12c0 3.31-2.69 6-6 6v-3l-4 4 4 4v-3c4.42 0 8-3.58 8-8 0-1.57-.46-3.03-1.24-4.26z"/></svg>',
   volOff:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>',
   volOn: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>',
+  // Side panel toggle. The filled block shows where the events panel is; empty
+  // means it is hidden. A chevron alone did not say what it would do.
+  panelOn:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="14" y="6" width="6" height="12" fill="currentColor" stroke="none" rx="1"/></svg>',
+  panelOff:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M14 5v14"/></svg>',
   grid:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 3v8h8V3H3zm6 6H5V5h4v4zm-6 4v8h8v-8H3zm6 6H5v-4h4v4zm4-16v8h8V3h-8zm6 6h-4V5h4v4zm-6 4v8h8v-8h-8zm6 6h-4v-4h4v4z"/></svg>',
   person:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>',
 };
@@ -43,6 +56,36 @@ const PALETTE = ['#3b82f6','#a855f7','#f59e0b','#10b981','#f472b6','#22d3ee','#e
 function labelColor(l) { if (!l) return '#f59e0b'; if (LABEL_COLORS[l]) return LABEL_COLORS[l]; let h=0; for (const c of l) h=(h*31+c.charCodeAt(0))>>>0; return PALETTE[h%PALETTE.length]; }
 // per-camera recording bar colours (distinct from event marker colours)
 const CAM_COLORS = ['rgba(30,80,200,.5)','rgba(210,80,30,.5)','rgba(30,170,80,.5)','rgba(170,30,180,.5)'];
+// Predefined grid layouts. A layout is just a column count plus a size per
+// position, so it rides on the same span mechanism as a hand written config.
+// The editor draws each one as numbered cells, because "span: 2" tells nobody
+// what they are going to get.
+// spans: [cols, rows] per tile, in camera order. Cameras beyond the list are 1x1.
+const GRID_LAYOUTS = [
+  { id: 'auto',  label: 'Automatic', tiles: 0, cols: 0, spans: [] },
+  { id: '2-row', label: '2 stacked', tiles: 2, cols: 1, spans: [] },
+  { id: '2-col', label: '2 side by side', tiles: 2, cols: 2, spans: [] },
+  { id: '3-big', label: '1 large + 2', tiles: 3, cols: 3, spans: [[2, 2]] },
+  { id: '4',     label: '2 x 2', tiles: 4, cols: 2, spans: [] },
+  { id: '6-big', label: '1 large + 5', tiles: 6, cols: 3, spans: [[2, 2]] },
+  { id: '8-big', label: '1 large + 7', tiles: 8, cols: 4, spans: [[3, 3]] },
+  { id: '9',     label: '3 x 3', tiles: 9, cols: 3, spans: [] },
+  { id: '10-big',label: '2 large + 8', tiles: 10, cols: 4, spans: [[2, 2], [2, 2]] },
+  { id: '16',    label: '4 x 4', tiles: 16, cols: 4, spans: [] },
+];
+function findLayout(id) { return GRID_LAYOUTS.find(l => l.id === id) || null; }
+
+// A camera's size in grid cells. Accepts a number (square, e.g. 2 for 2x2) or
+// {cols, rows}. Clamped so a typo cannot produce a grid nothing else fits in.
+function normSpan(span) {
+  const clamp = v => Math.max(1, Math.min(4, Math.round(Number(v) || 1)));
+  if (typeof span === 'number' || typeof span === 'string') {
+    const v = clamp(span);
+    return { cols: v, rows: v };
+  }
+  if (span && typeof span === 'object') return { cols: clamp(span.cols), rows: clamp(span.rows) };
+  return { cols: 1, rows: 1 };
+}
 function mkCamState() { return { clientId:'frigate', cam:'', events:[], recordings:[], reviews:[], kept:[], discovered:false }; }
 function camDisplayName(c) { return c.name || (c.entity||'').replace(/^camera\./,'').replace(/_/g,' '); }
 
@@ -92,8 +135,19 @@ const STYLES = `
      col-right max-height is set dynamically by JS to match col-left.offsetHeight
      so the events panel never makes the card taller than the stream side. */
   .card.wide .layout{flex-direction:row;align-items:flex-start;}
-  .card.wide .col-left{width:58%;flex-shrink:0;}
-  .card.wide .col-right{flex:1;min-width:0;overflow-y:auto;border-left:1px solid var(--c-border);}
+  /* Widths rather than flex so the events panel can be slid away: both sides
+     animate, the cameras take over the space instead of being covered by an
+     overlay. */
+  /* The stream column takes whatever is left, so the events panel can both be
+     capped and animate away without leaving a gap. An event row needs about
+     400px; beyond that the rows just stretch and the cameras lose width for
+     nothing. */
+  .card.wide .col-left{flex:1 1 auto;min-width:0;}
+  .card.wide .col-right{width:42%;max-width:400px;flex:0 0 auto;min-width:0;overflow-y:auto;border-left:1px solid var(--c-border);transition:width .28s ease,max-width .28s ease,opacity .18s ease;}
+  .card.wide.events-collapsed .col-right{width:0;max-width:0;opacity:0;overflow:hidden;border-left-color:transparent;}
+  /* Narrow layouts already have the browse toggle for this. */
+  .card:not(.wide) #sc-events{display:none;}
+  .card.events-collapsed #sc-events{color:var(--c-text3);}
   /* Cap stream height so a full-width section doesn't produce an 800px stream.
      User can override via stream_height config. */
   .card.wide #eng-wrap{max-height:var(--stream-h,55vh);}
@@ -109,6 +163,15 @@ const STYLES = `
   #engine.zooming{transition:none;}
   #engine:not(.zooming){transition:transform .15s ease-out;}
   #engine ha-camera-stream,#engine ha-hls-player,#engine frigate-go2rtc-player{width:100%;height:100%;display:block;}
+  /* The outgoing camera's last frame, held while the next one connects, then
+     dissolved out as the new stream comes up. Both sides animate so the change
+     reads as one movement rather than a swap. */
+  .engine-hold{position:absolute;inset:0;background:var(--c-bg-deep) center/contain no-repeat;z-index:0;opacity:1;transition:opacity .55s cubic-bezier(.4,0,.2,1);}
+  .engine-hold.dim{opacity:.35;}
+  .engine-hold.out{opacity:0;}
+  .engine-wait{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;z-index:1;pointer-events:none;}
+  #engine .engine-player{position:relative;z-index:2;opacity:0;transition:opacity .55s cubic-bezier(.4,0,.2,1);}
+  #engine .engine-player.shown{opacity:1;}
   .viewer{position:absolute;inset:0;background:#000;display:flex;align-items:center;justify-content:center;z-index:4;}
   .viewer video,.viewer img.snap{width:100%;height:100%;object-fit:contain;background:#000;}
   .viewer .ld{color:var(--c-text2);font-size:13px;}
@@ -120,16 +183,12 @@ const STYLES = `
   .btn{display:inline-flex;align-items:center;gap:5px;background:rgba(15,21,40,.82);border:1px solid rgba(255,255,255,.15);color:#fff;border-radius:8px;padding:6px 11px;font-size:12px;font-weight:600;cursor:pointer;}
   .btn svg{width:14px;height:14px;}
 
-  /* ── stream controls (inline in info-row, consistent in single + grid mode) ── */
-  .scb-btn{width:30px;height:30px;display:flex;align-items:center;justify-content:center;background:var(--c-bg-panel);border:1px solid var(--c-border2);color:var(--c-text2);border-radius:8px;cursor:pointer;flex-shrink:0;}
-  .scb-btn:hover{background:var(--c-acc-bg);border-color:var(--c-acc-bdr);color:#93c5fd;}
-  .scb-btn svg{width:15px;height:15px;}
-
   /* ── camera grid ── */
-  .cam-grid{display:grid;width:100%;}
-  .cam-grid.cams-1{grid-template-columns:1fr;}
-  .cam-grid.cams-2{grid-template-columns:1fr 1fr;}
-  .cam-grid.cams-3,.cam-grid.cams-4{grid-template-columns:1fr 1fr;}
+  /* Column count comes from --grid-cols, set inline by _mountGrid, so any
+     number of cameras works without a rule per count. */
+  /* dense so a camera spanning several cells does not leave holes behind it:
+     later tiles backfill the gaps instead of the grid keeping empty squares. */
+  .cam-grid{display:grid;width:100%;grid-template-columns:repeat(var(--grid-cols,2),1fr);grid-auto-flow:dense;grid-auto-rows:1fr;}
   .grid-slot{position:relative;aspect-ratio:16/9;background:var(--c-bg-deep);overflow:hidden;cursor:pointer;transition:box-shadow .15s;}
   .grid-slot:hover{box-shadow:inset 0 0 0 2px rgba(59,130,246,.5);}
   .grid-slot.placeholder{background:#06090f;cursor:default;}
@@ -152,22 +211,32 @@ const STYLES = `
   .cam-grid:fullscreen{width:100vw;height:100vh;max-height:none!important;background:#000;animation:fsIn .25s cubic-bezier(.22,.8,.22,1);}
   .cam-grid:-webkit-full-screen{width:100vw;height:100vh;max-height:none!important;background:#000;animation:fsIn .25s cubic-bezier(.22,.8,.22,1);}
   .cam-grid:fullscreen .grid-slot,.cam-grid:-webkit-full-screen .grid-slot{aspect-ratio:unset;border-radius:0;}
-  .cam-grid:fullscreen.cams-3,.cam-grid:fullscreen.cams-4,.cam-grid:-webkit-full-screen.cams-3,.cam-grid:-webkit-full-screen.cams-4{grid-template-rows:1fr 1fr;}
+  .cam-grid:fullscreen.multi-row,.cam-grid:-webkit-full-screen.multi-row{grid-template-rows:repeat(var(--grid-rows,2),1fr);}
   .grid-label{position:absolute;bottom:4px;left:6px;font-size:10px;font-weight:600;color:rgba(255,255,255,.85);text-shadow:0 1px 2px rgba(0,0,0,.8);background:rgba(0,0,0,.45);padding:1px 7px;border-radius:10px;pointer-events:none;z-index:2;}
-  /* 3/4-cam grid: cap height so 2 rows fit viewport */
-  .card.grid-mode .cam-grid.cams-3,
-  .card.grid-mode .cam-grid.cams-4 { max-height:var(--stream-h,70vh); grid-template-rows:1fr 1fr; }
-  .card.grid-mode .cam-grid.cams-3 .grid-slot,
-  .card.grid-mode .cam-grid.cams-4 .grid-slot { aspect-ratio:unset; min-height:0; }
+  /* More than one row: cap the height so the whole grid fits the viewport and
+     let the tiles share it, rather than each keeping its 16:9 box. */
+  .card.grid-mode .cam-grid.multi-row:not(.stacked) { max-height:var(--stream-h,70vh); grid-template-rows:repeat(var(--grid-rows,2),1fr); }
+  .card.grid-mode .cam-grid.multi-row:not(.stacked) .grid-slot { aspect-ratio:unset; min-height:0; }
+  /* Stacked: tiles keep their 16:9 box and the column simply gets taller.
+     Capping the height here would squash every tile, the same mistake as on
+     mobile. Honour an explicit stream_height, and scroll past it. */
+  .card.grid-mode .cam-grid.stacked { max-height:var(--stream-h,none); overflow-y:auto; }
   /* Single stream: optional height cap */
   #eng-wrap { max-height:var(--stream-h,none); }
-  /* Mobile grid: show 2×2 at same total height as a single stream (56.25vw = 16:9) */
-  .card.mobile .cam-grid { max-height:56.25vw; }
-  .card.mobile .cam-grid .grid-slot { aspect-ratio:unset; min-height:0; }
+  /* Mobile: keep the grid about as tall as its tiles actually need. Each tile
+     is one column wide, so 16:9 makes a row 56.25vw/cols tall. A stacked
+     (single-column) grid is exempt: capping it squashes every tile to a sliver,
+     which is the opposite of what stacking is for, and it is meant to scroll. */
+  .card.mobile .cam-grid.multi-row:not(.stacked) {
+    max-height:calc(56.25vw * var(--grid-rows,2) / var(--grid-cols,2));
+  }
+  .card.mobile .cam-grid.multi-row:not(.stacked) .grid-slot { aspect-ratio:unset; min-height:0; }
 
   /* ── info row ── */
-  .info-row{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:10px 16px 8px;border-bottom:1px solid var(--c-border);}
-  .stream-ctrl-bar{display:flex;align-items:center;justify-content:center;gap:6px;}
+  .info-row{display:grid;grid-template-columns:1fr auto;align-items:center;padding:10px 16px 8px;border-bottom:1px solid var(--c-border);}
+  /* Sits in the timeline toolbar, so it inherits that spacing and its buttons
+     use the same .tool style as the ones beside it. */
+  .stream-ctrl-bar{display:flex;align-items:center;gap:4px;}
   .info-title{font-size:14px;font-weight:700;color:var(--c-text);} .info-sub{font-size:11px;color:var(--c-text3);margin-top:1px;}
   .stats{display:flex;gap:16px;justify-self:end;} .stat{display:flex;flex-direction:column;align-items:flex-end;}
   .sv{font-size:14px;font-weight:700;color:#93c5fd;} .sl{font-size:10px;color:var(--c-text4);text-transform:uppercase;letter-spacing:.06em;}
@@ -209,6 +278,8 @@ const STYLES = `
   .tl-tools{display:flex;gap:4px;}
   .tool{background:var(--c-bg-panel);border:1px solid var(--c-border2);color:var(--c-text2);border-radius:7px;padding:4px 7px;cursor:pointer;}
   .tool svg{width:13px;height:13px;display:block;} .tool:hover{color:#93c5fd;border-color:var(--c-acc-bdr);}
+  /* Labelled tool: the view switch is worth reading, not just recognising. */
+  .tool-txt{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;font-size:11px;font-weight:600;}
   .tl-track{position:relative;height:30px;background:var(--c-bg-panel);border-radius:6px;overflow:hidden;cursor:grab;touch-action:pan-y;}
   .tl-track.grab{cursor:grabbing;}
   .tl-track::before{content:'';position:absolute;inset:0;background:repeating-linear-gradient(90deg,transparent,transparent calc(100%/12 - 1px),rgba(255,255,255,.04) calc(100%/12 - 1px),rgba(255,255,255,.04) calc(100%/12));}
@@ -304,8 +375,6 @@ const STYLES = `
   .rec-dl-btn{padding:4px 11px;background:rgba(59,130,246,.45);border:1px solid rgba(59,130,246,.7);color:#fff;border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;}
   .rec-dl-btn:hover{background:rgba(59,130,246,.75);}
 
-  /* ── stream control active state (zone toggle when on) ── */
-  .scb-btn.active{background:var(--c-acc-bg)!important;border-color:var(--c-acc-bdr)!important;color:var(--c-acc)!important;}
 `;
 
 // ── editor ───────────────────────────────────────────────────
@@ -1030,6 +1099,7 @@ class FrigateModernHassCard extends HTMLElement {
     // UI
     this._tab = 'live'; this._playing = null;
     this._browseOpen = false;
+    this._eventsCollapsed = false; // wide layout only; narrow uses the browse toggle
     this._winEnd = 0; this._winStart = 0;
     this._loading = false; this._exhausted = false;
     this._daysWithActivity = new Set();
@@ -1049,11 +1119,10 @@ class FrigateModernHassCard extends HTMLElement {
   setConfig(config) {
     let cameras;
     if (config.cameras && Array.isArray(config.cameras) && config.cameras.length)
-      cameras = config.cameras.map(c => ({ entity:c.entity, name:c.name||null }));
+      cameras = config.cameras.map(c => ({ entity:c.entity, name:c.name||null, span:normSpan(c.span) }));
     else if (config.camera_entity)
-      cameras = [{ entity:config.camera_entity, name:config.title||null }];
+      cameras = [{ entity:config.camera_entity, name:config.title||null, span:normSpan() }];
     else throw new Error('camera_entity or cameras[] required');
-    if (cameras.length > 4) cameras = cameras.slice(0, 4);
 
     this._config = {
       cameras,
@@ -1073,6 +1142,26 @@ class FrigateModernHassCard extends HTMLElement {
       // Live view source. 'go2rtc' streams via Frigate's built-in go2rtc
       // (WebRTC/MSE) for much lower latency; it falls back to the standard
       // Home Assistant stream if it can't connect.
+      // Start with the events panel slid away, for a camera-first dashboard.
+      events_collapsed: config.events_collapsed === true,
+      // A named layout from GRID_LAYOUTS. It sets the column count and the tile
+      // sizes together, so it overrides grid_columns and any per-camera span.
+      grid_layout: findLayout(config.grid_layout) ? config.grid_layout : 'auto',
+      // Grid columns: 'auto' works one out from the camera count, or pin a
+      // number. 1 stacks the cameras vertically.
+      grid_columns: (config.grid_columns === undefined || config.grid_columns === 'auto')
+        ? 'auto' : Math.max(1, Math.min(6, Number(config.grid_columns) || 1)),
+      // Logs why the live view chose what it chose. Off unless asked for, so it
+      // can stay in the code rather than being bolted on during every hunt.
+      debug: config.debug === true,
+      // A grid on a phone is a row of pictures too small to see anything in, so
+      // it stacks by default. Off is for the deliberate case: two cameras side
+      // by side, or a small grid as an overview.
+      stack_on_mobile: config.stack_on_mobile !== false,
+      // Escape hatch for the width at which a column is dropped. Not in the
+      // editor: the stacking question is the one people actually have, and this
+      // is the answer to a rarer one.
+      min_tile_width: config.min_tile_width ? Math.max(80, Number(config.min_tile_width)) : null,
       live_provider: config.live_provider === 'go2rtc' ? 'go2rtc' : 'hls',
       // Which go2rtc transport to use. Defaults to 'mse': WebRTC media does not
       // travel through Home Assistant's proxy — it connects straight to
@@ -1084,6 +1173,7 @@ class FrigateModernHassCard extends HTMLElement {
       go2rtc_mode: ['auto','webrtc','mse'].includes(config.go2rtc_mode) ? config.go2rtc_mode : 'mse',
     };
     this._browseOpen = this._config.browse_expanded;
+    this._eventsCollapsed = this._config.events_collapsed;
     for (const c of cameras) { if (!this._camCache[c.entity]) this._camCache[c.entity] = mkCamState(); }
     this._renderShell();
   }
@@ -1135,10 +1225,12 @@ class FrigateModernHassCard extends HTMLElement {
     await this._discoverAll();
     const now = Math.floor(Date.now()/1000);
     this._winEnd = now; this._winStart = now - this._config.window_hours*3600;
-    if (this._config.default_view === 'grid' && this._config.cameras.length > 1) {
-      this._setViewMode('grid');
-    }
-    await this._mountEngine();
+    const startInGrid = this._config.default_view === 'grid' && this._config.cameras.length > 1;
+    if (startInGrid) this._setViewMode('grid');
+    // Only start the single view player when it is the one on screen. Mounting
+    // it behind the grid opened a stream nobody could see, competing with the
+    // tiles for bandwidth and connections.
+    if (!startInGrid) await this._mountEngine();
     await this._loadWindow(true);
     this._loadCalendar();
     this._subscribe();
@@ -1168,11 +1260,69 @@ class FrigateModernHassCard extends HTMLElement {
     return { ...raw, attributes: attrs };
   }
 
+  // Switching cameras used to blank the picture to a spinner, which reads as
+  // something breaking rather than something changing. Keep the last frame on
+  // screen instead and fade the new stream in over it. A canvas copy costs
+  // nothing and avoids holding two streams open at once.
+  _captureFrame() {
+    try {
+      const vid = this._engine ? this._findVideo(this._engine, 0) : null;
+      if (!vid?.videoWidth) return null;
+      const canvas = document.createElement('canvas');
+      canvas.width = vid.videoWidth;
+      canvas.height = vid.videoHeight;
+      canvas.getContext('2d').drawImage(vid, 0, 0);
+      return canvas.toDataURL('image/jpeg', 0.7);
+    } catch (_) {
+      return null; // tainted canvas or no frame yet; fall back to the spinner
+    }
+  }
+  _holdFrame(slot, frame) {
+    if (!frame) return;
+    const hold = document.createElement('div');
+    hold.className = 'engine-hold';
+    hold.style.backgroundImage = `url(${frame})`;
+    slot.insertAdjacentElement('afterbegin', hold);
+    const wait = document.createElement('div');
+    wait.className = 'engine-wait';
+    wait.innerHTML = '<div class="ph-spin"></div>';
+    slot.insertAdjacentElement('afterbegin', wait);
+    // Dim the held frame straight away. Left at full strength it just looks
+    // like the picture froze, with no sign anything is happening.
+    requestAnimationFrame(() => hold.classList.add('dim'));
+  }
+  // Reveal the player once it actually has picture, then drop the held frame.
+  // The timeout is a safety net: without it a stream that never reports playing
+  // would stay invisible behind a still image.
+  _fadeInPlayer(slot, el) {
+    el.classList.add('engine-player');
+    let done = false;
+    const reveal = () => {
+      if (done) return;
+      done = true;
+      el.classList.add('shown');
+      slot.querySelector('.engine-wait')?.remove();
+      const hold = slot.querySelector('.engine-hold');
+      if (hold) {
+        hold.classList.remove('dim');
+        hold.classList.add('out');
+        setTimeout(() => hold.remove(), 600);
+      }
+    };
+    const vid = this._findVideo(el, 0);
+    if (vid) {
+      vid.addEventListener('playing', reveal, { once: true });
+      vid.addEventListener('loadeddata', reveal, { once: true });
+    }
+    setTimeout(reveal, 4000);
+  }
   async _mountEngine() {
     const slot = this.shadowRoot.querySelector('#engine'); if (!slot) return;
     const entity = this._activeCam?.entity; if (!entity) return;
+    const frame = this._captureFrame(); // before anything is torn down
     const spinner = '<div class="ph"><div class="ph-spin"></div></div>';
-    slot.innerHTML = spinner;
+    slot.innerHTML = frame ? '' : spinner;
+    this._holdFrame(slot, frame);
     this._engine = null;
     this._teardownGo2rtc();
     this._engineSeq = (this._engineSeq || 0) + 1;
@@ -1181,10 +1331,14 @@ class FrigateModernHassCard extends HTMLElement {
     if (!stateObj) return;
 
     if (this._config.live_provider === 'go2rtc') {
+      const t0 = Date.now();
       const ok = await this._mountGo2rtc(slot, token);
+      this._dbg(`single view ${entity}: go2rtc ${ok ? 'playing' : 'gave up'} after ${Date.now() - t0}ms`);
       if (ok || this._engineSeq !== token) return;
-      slot.innerHTML = spinner; // go2rtc didn't start — fall through to HLS
+      slot.innerHTML = frame ? '' : spinner; // go2rtc did not start, fall through to HLS
+      this._holdFrame(slot, frame);
     }
+    this._dbg(`single view ${entity}: starting the Home Assistant HLS player`);
     this._mountHaPlayer(slot, entity, stateObj);
   }
 
@@ -1202,38 +1356,87 @@ class FrigateModernHassCard extends HTMLElement {
   // Returns true when go2rtc is playing (or was superseded), false to fall back to HLS.
   async _mountGo2rtc(slot, token) {
     const { clientId, cam } = this._cc();
-    if (!clientId || !cam) return false;
+    if (!clientId || !cam) {
+      this._dbg('no go2rtc: this camera has no Frigate instance/name yet', { clientId, cam });
+      return false;
+    }
+    // A camera Frigate does not publish to go2rtc closes the socket at once. Once
+    // is enough to learn that: without this, every switch back to that camera
+    // spent four seconds waiting for a connection that is never coming.
+    const cache = this._camCache[this._activeCam?.entity];
+    if (cache?.noGo2rtc) {
+      this._dbg(cam, 'has no go2rtc stream, going straight to the Home Assistant stream');
+      return false;
+    }
     const paths = this._go2rtcPaths(clientId, cam);
     for (const path of paths) {
-      const { ok, routeWorks } = await this._tryGo2rtcPath(slot, token, path);
+      let r = await this._tryGo2rtcPath(slot, token, path);
       if (this._engineSeq !== token) return true; // superseded, nothing to do
-      if (ok) { this._go2rtcPath = path; return true; } // remember what worked
+      if (r.ok) { this._go2rtcPath = path; return true; } // remember what worked
+      // The browser accepted the codec and then could not decode it. Ask for the
+      // same stream without H.265 before giving up on go2rtc entirely.
+      if (r.mediaError) {
+        this._dbg('decode failed, asking go2rtc for H.264 instead:', r.mediaError);
+        r = await this._tryGo2rtcPath(slot, token, path, { noHevc: true });
+        if (this._engineSeq !== token) return true;
+        if (r.ok) { this._go2rtcPath = path; return true; }
+      }
       // The socket opened but the stream never played: this proxy route is
       // fine, so the other one won't help. Go straight to the HLS fallback.
-      if (routeWorks) return false;
+      if (r.routeWorks) return false;
     }
+    // Every route refused the connection while others work, so go2rtc does not
+    // carry this camera. Remember it for as long as the card is open.
+    if (cache) cache.noGo2rtc = true;
+    this._dbg(cam, 'no go2rtc stream on any route; using the Home Assistant stream from now on');
     return false;
   }
-  async _tryGo2rtcPath(slot, token, path) {
+  async _tryGo2rtcPath(slot, token, path, opts = {}) {
     const src = await this._signed(path);
     if (this._engineSeq !== token) return { ok: false, routeWorks: false };
 
     const player = document.createElement('frigate-go2rtc-player');
     player.style.cssText = 'width:100%;height:100%;display:block';
-    slot.innerHTML = ''; slot.appendChild(player); // creates its <video> synchronously
+    slot.querySelectorAll(':scope > :not(.engine-hold):not(.engine-wait)').forEach(n => n.remove());
+    slot.appendChild(player); // creates its <video> synchronously
+    // Chrome reports H.265 as supported and then fails to decode the stream. The
+    // player advertises whatever the browser claims, so go2rtc picks H.265 and
+    // the picture never arrives. Dropping it from the offer makes go2rtc send
+    // H.264 instead. Only on the retry: where H.265 does work it is the better
+    // stream, and this costs go2rtc a transcode.
+    if (opts.noHevc) player.CODECS = player.CODECS.filter(c => !c.startsWith('hvc1'));
     // Upstream's player starts unmuted and only mutes if autoplay is refused;
     // mute before connecting so the live view is never unexpectedly audible.
     if (player.video) {
       player.video.muted = true;
       player.video.style.objectFit = 'contain';
     }
+    // A decode error means waiting out the timeout is pointless: the stream is
+    // arriving, the browser just cannot play it.
+    let mediaError = null;
+    player.video?.addEventListener('error', () => {
+      mediaError = player.video?.error?.message || 'media error';
+    }, { once: true });
     // WebRTC media does not travel through HA's proxy — it goes straight to
     // go2rtc's own port, which typically only resolves on the local network.
     // 'mse' keeps everything on the (proxied) WebSocket instead.
     this._applyGo2rtcMode(player);
     player.src = src;
+    // Right after src the player has either created the socket (CONNECTING) or
+    // refused to, and the two need different fixes: refused means the element
+    // was not in the document yet, CLOSED later means the server hung up.
+    this._dbg('after src', {
+      inDocument: player.isConnected, signed: src !== path, ws: player.wsState, pc: player.pcState,
+    });
+    // The close code says who hung up and why: 1006 is the handshake being
+    // refused (wrong path, or auth), 1000 is a clean close from the other end.
+    if (this._config.debug && player.ws) {
+      player.ws.addEventListener('close', e => this._dbg('socket closed', { code: e.code, reason: e.reason, clean: e.wasClean }));
+      player.ws.addEventListener('open', () => this._dbg('socket open'));
+    }
     this._go2rtcPlayer = player;
     this._engine = player;
+    this._fadeInPlayer(slot, player);
     this._renderStreamCtrl();
 
     // Two separate questions, and conflating them was a bug: does this proxy
@@ -1253,10 +1456,13 @@ class FrigateModernHassCard extends HTMLElement {
       const poll = setInterval(() => {
         const elapsed = Date.now() - started;
         const socketOpen = player.wsState === WebSocket.OPEN || player.pcState === WebSocket.OPEN;
-        if (!socketOpen && elapsed > SOCKET_MS) finish({ ok: false, routeWorks: false });
+        if (mediaError) finish({ ok: false, routeWorks: true, mediaError });
+        else if (!socketOpen && elapsed > SOCKET_MS) finish({ ok: false, routeWorks: false });
         else if (elapsed > PLAY_MS) finish({ ok: false, routeWorks: true });
       }, 250);
     });
+    this._dbg('go2rtc path', path.replace(/\?.*/, ''), result.ok ? 'playing' : (result.mediaError ? `decode failed: ${result.mediaError}` : (result.routeWorks ? 'socket opened but no picture' : 'socket never opened')),
+      { ws: player.wsState, pc: player.pcState, mode: player.mode, video: !!player.video, ready: player.video?.readyState });
     if (this._engineSeq !== token) return { ok: false, routeWorks: true };
     if (result.ok) { this._startGo2rtcWatchdog(player, () => this._mountEngine()); return result; }
     this._teardownGo2rtc();
@@ -1331,6 +1537,16 @@ class FrigateModernHassCard extends HTMLElement {
     (this._gridPlayers || []).forEach(p => this._stopGo2rtcPlayer(p));
     this._gridPlayers = [];
   }
+  // Hiding the grid does not stop it. Every tile holds its own connection, so a
+  // hidden grid of seven cameras keeps seven streams running while the single
+  // view tries to start an eighth, and that one is the one you are waiting for.
+  // Emptying the element also disconnects the ha-hls-player instances.
+  _teardownGrid() {
+    this._teardownGridGo2rtc();
+    const grid = this.shadowRoot.querySelector('#cam-grid');
+    if (grid) grid.innerHTML = '';
+    this._gridCols = 0;
+  }
   _teardownGo2rtc() {
     const p = this._go2rtcPlayer;
     if (!p) return;
@@ -1368,8 +1584,10 @@ class FrigateModernHassCard extends HTMLElement {
     s.controls = true;
     s.muted = true;
     s.style.cssText = 'width:100%;height:100%;display:block';
-    slot.innerHTML = ''; slot.appendChild(s);
+    slot.querySelectorAll(':scope > :not(.engine-hold):not(.engine-wait)').forEach(n => n.remove());
+    slot.appendChild(s);
     this._engine = s;
+    this._fadeInPlayer(slot, s);
     this._renderStreamCtrl();
   }
 
@@ -1445,21 +1663,96 @@ class FrigateModernHassCard extends HTMLElement {
   }
 
   // ── camera grid ───────────────────────────────────────────
+  // Columns for the grid. 'auto' keeps tiles roughly square-ish as cameras are
+  // added; a pinned number wins, and 1 gives a vertical stack.
+  // The 'auto' entry exists so the editor can show it as a choice; it means no
+  // layout, leaving the column count and any hand written spans alone.
+  _activeLayout() {
+    const id = this._config.grid_layout;
+    return id && id !== 'auto' ? findLayout(id) : null;
+  }
+  // How narrow a tile may get before the grid drops a column. Configurable
+  // because it is the one number that decides when a phone stacks: lower it and
+  // two columns survive on a phone, raise it and even a tablet stacks.
+  _minTilePx() {
+    const v = Number(this._config.min_tile_width);
+    return v > 0 ? Math.max(80, v) : MIN_TILE_PX;
+  }
+  // Cells the cameras will occupy, a camera spanning more than one included.
+  _gridCells() {
+    return this._config.cameras.reduce((sum, c) => {
+      const sp = c.span || {};
+      return sum + Math.max(1, Number(sp.cols) || 1) * Math.max(1, Number(sp.rows) || 1);
+    }, 0);
+  }
+  _gridColumns(n) {
+    const layout = this._activeLayout();
+    const min = this._minTilePx();
+    // On a phone, stacking wins over everything else, a chosen layout included.
+    // Four tiles on a 412px screen is not a grid, it is four thumbnails.
+    const w0 = this._cardWidth || this.offsetWidth || 0;
+    if (this._config.stack_on_mobile && w0 && w0 < PHONE_PX) return 1;
+    if (layout?.cols) {
+      // Still bounded by width: a four column layout on a phone is unreadable.
+      const w = this._cardWidth || this.offsetWidth || 0;
+      return w ? Math.max(1, Math.min(layout.cols, Math.floor(w / min))) : layout.cols;
+    }
+    const cfg = this._config.grid_columns;
+    // A pinned column count is still capped by what there is to put in it. Four
+    // columns for three cameras leaves an empty tile at the end of the row,
+    // which reads as a camera that failed to load rather than as a choice.
+    if (cfg && cfg !== 'auto') return Math.max(1, Math.min(Number(cfg) || 1, this._gridCells()));
+    let cols = n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : 4;
+    // Never make tiles so narrow they stop being watchable. Without this a
+    // phone showing seven cameras got three columns of ~100px tiles; the count
+    // alone says nothing about how much room there actually is.
+    const width = this._cardWidth || this.offsetWidth || 0;
+    if (width) cols = Math.max(1, Math.min(cols, Math.floor(width / min)));
+    return cols;
+  }
   async _mountGrid() {
     const grid = this.shadowRoot.querySelector('#cam-grid'); if (!grid) return;
     const n = this._config.cameras.length;
-    const slots = n === 3 ? 4 : n;   // 3 cams → 4 slots, last is placeholder
-    grid.className = `cam-grid cams-${n}`;
+    const cols = this._gridColumns(n);
+    // A camera may occupy more than one cell, which is what gives the
+    // asymmetric layouts (one large with smaller ones around it). A span wider
+    // than the grid is clamped, so the same config still works when the column
+    // count drops on a phone.
+    const layout = this._activeLayout();
+    const spans = this._config.cameras.map((c, i) => {
+      const preset = layout?.spans?.[i];
+      const want = preset ? { cols: preset[0], rows: preset[1] } : (layout ? { cols: 1, rows: 1 } : c.span || { cols: 1, rows: 1 });
+      const wc = want.cols || 1, wr = want.rows || 1;
+      const fit = Math.min(wc, cols);
+      // Shrink the height by as much as the width had to shrink, or a tile that
+      // wanted 3x3 keeps three rows in a single column and leaves two empty
+      // screens below the video.
+      return { cols: fit, rows: Math.max(1, Math.round(wr * (fit / wc))) };
+    });
+    const cells = spans.reduce((sum, sp) => sum + sp.cols * sp.rows, 0);
+    const rows = Math.max(1, Math.ceil(cells / cols));
+    const slots = cols * rows;       // leftover cells become placeholders
+    grid.className = `cam-grid cams-${n}${rows > 1 ? ' multi-row' : ''}${cols === 1 ? ' stacked' : ''}`;
+    grid.style.setProperty('--grid-cols', cols);
+    grid.style.setProperty('--grid-rows', rows);
+    this._gridCols = cols;
     this._teardownGridGo2rtc();
     grid.innerHTML = '';
     this._gridSeq = (this._gridSeq || 0) + 1;
     const gridToken = this._gridSeq;
     this._gridToken = gridToken;
-    for (let i = 0; i < slots; i++) {
+    // Cameras first, then placeholders for whatever cells are left over. In a
+    // single column there is no shape to preserve, so an empty tile would just
+    // be a gap in a list.
+    const total = n + (cols === 1 ? 0 : Math.max(0, slots - cells));
+    for (let i = 0; i < total; i++) {
       const slot = document.createElement('div');
       const isPlaceholder = i >= n;
       slot.className = `grid-slot${isPlaceholder ? ' placeholder' : ''}`;
       if (!isPlaceholder) {
+        const sp = spans[i];
+        if (sp.cols > 1) slot.style.gridColumn = `span ${sp.cols}`;
+        if (sp.rows > 1) slot.style.gridRow = `span ${sp.rows}`;
         const c = this._config.cameras[i];
         const name = cap(camDisplayName(c));
         // stream — go2rtc when configured (one WebSocket per tile is far
@@ -1545,6 +1838,7 @@ class FrigateModernHassCard extends HTMLElement {
       this._gridPlayers = (this._gridPlayers || []).filter(x => x !== player);
       return;
     }
+    this._dbg('grid tile', entity, ok ? 'playing' : 'gave up', { ws: player.wsState, pc: player.pcState });
     if (ok) {
       slot.querySelector('.ph')?.remove();
       this._startGo2rtcWatchdog(player, giveUp);
@@ -1562,13 +1856,44 @@ class FrigateModernHassCard extends HTMLElement {
   _renderStreamCtrl() {
     const bar = this.shadowRoot.querySelector('#stream-ctrl-bar'); if (!bar) return;
     const inGrid = this._viewMode === 'grid';
-    bar.innerHTML = inGrid
-      ? `<button class="scb-btn" id="sc-fs" title="Fullscreen">${ICONS.expand}</button>`
+    // Switching between one camera and all of them is a view control, so it
+    // belongs with fullscreen and the events panel. It used to sit in the row of
+    // camera tabs, where it read as another camera and was easy to miss. Labelled
+    // rather than an icon alone, for the same reason.
+    // The word is what the button does, never where you are. Highlighting it as
+    // well made it read as the mode you were already in, which is backwards.
+    const grid = this._config.cameras.length > 1
+      ? `<button class="tool tool-txt" id="sc-grid" title="${inGrid ? 'Show one camera' : 'Show all cameras'}">${inGrid ? ICONS.live : ICONS.grid}<span>${inGrid ? 'Single' : 'Grid'}</span></button>`
       : '';
+    const fs = inGrid ? `<button class="tool" id="sc-fs" title="Fullscreen">${ICONS.expand}</button>` : '';
+    // Only meaningful in the wide layout, where the events panel sits beside the
+    // cameras. CSS hides it when narrow, since there the browse toggle does this.
+    const events = `<button class="tool" id="sc-events"></button>`;
+    bar.innerHTML = `${grid}${fs}${events}`;
+    this._applyEventsCollapsed();
+  }
+  _applyEventsCollapsed() {
+    const card = this.shadowRoot.querySelector('.card'); if (!card) return;
+    card.classList.toggle('events-collapsed', this._eventsCollapsed);
+    const btn = this.shadowRoot.querySelector('#sc-events');
+    if (btn) {
+      btn.innerHTML = this._eventsCollapsed ? ICONS.panelOff : ICONS.panelOn;
+      btn.title = this._eventsCollapsed ? 'Show events panel' : 'Hide events panel';
+    }
+  }
+  _toggleEvents() {
+    this._eventsCollapsed = !this._eventsCollapsed;
+    this._applyEventsCollapsed();
+    // The stream column changes width, so the height the events column is
+    // matched to changes with it. Re-measure once the animation has settled.
+    setTimeout(() => { if (this._cardWidth >= 560) this._syncColHeight(); }, 320);
   }
 
   // ── view mode ─────────────────────────────────────────────
-  _setViewMode(mode) {
+  // mount:false is for a caller that will mount the engine itself, so clicking a
+  // camera in the grid does not first start the previously active camera and
+  // then immediately tear it down again.
+  _setViewMode(mode, opts = {}) {
     this._viewMode = mode;
     const card = this.shadowRoot.querySelector('.card');
     if (card) card.classList.toggle('grid-mode', mode === 'grid');
@@ -1582,14 +1907,15 @@ class FrigateModernHassCard extends HTMLElement {
       const lbl = this.shadowRoot.querySelector('#list-label');
       if (lbl) lbl.textContent = 'All cameras';
       this._loadAllCamsBackground().then(() => this._renderAll());
-      this._renderStreamCtrl(); // hide mute button in grid mode
     } else {
       if (engWrap) engWrap.style.display = '';
       if (gridEl) gridEl.style.display = 'none';
+      this._teardownGrid();
       this._eventsMode = 'camera';
-      this._mountEngine();
+      if (opts.mount !== false) this._mountEngine();
       this._renderAll();
     }
+    this._renderStreamCtrl();
     this._renderCamSwitcher();
     this._applyBrowse();
     this.shadowRoot.querySelectorAll('[data-viewmode]').forEach(p =>
@@ -1600,7 +1926,7 @@ class FrigateModernHassCard extends HTMLElement {
   async _switchCamera(idx) {
     if (idx === this._activeCamIdx && this._viewMode === 'single') return;
     // Clicking a cam tab while in grid mode switches to single view of that camera
-    if (this._viewMode === 'grid') this._setViewMode('single');
+    if (this._viewMode === 'grid') this._setViewMode('single', { mount: false });
     const prevEnt = this._activeCam?.entity;
     if (prevEnt && this._camCache[prevEnt]) {
       this._camCache[prevEnt].events = this._events;
@@ -1609,12 +1935,16 @@ class FrigateModernHassCard extends HTMLElement {
     this._activeCamIdx = idx;
     const newEnt = this._activeCam?.entity;
     if (!this._camCache[newEnt]) this._camCache[newEnt] = mkCamState();
+    // Start the stream before waiting on anything else. The picture is what the
+    // user is waiting for; discovery is a round trip that only the events list
+    // needs.
+    const mounting = this._mountEngine();
     if (!this._camCache[newEnt].discovered) await this._discoverOne(newEnt);
     const cached = this._camCache[newEnt];
     this._events = cached.events||[]; this._recordings = cached.recordings||[];
     this._reviews = cached.reviews||[]; this._kept = cached.kept||[];
     this._renderCamSwitcher(); this._syncStatus();
-    await this._mountEngine();
+    await mounting;
     this._renderAll();
     await this._loadWindow(true);
   }
@@ -1639,6 +1969,7 @@ class FrigateModernHassCard extends HTMLElement {
 
   // ── data ─────────────────────────────────────────────────
   _cc() { return this._camCache[this._activeCam?.entity] || mkCamState(); }
+  _dbg(...a) { if (this._config?.debug) console.info('[frigate-card]', ...a); }
   async _ws(p) { return parseWs(await this._hass.callWS(p)); }
   _isNowWindow() { return Math.abs(this._winEnd - Math.floor(Date.now()/1000)) < 120; }
 
@@ -1746,6 +2077,7 @@ class FrigateModernHassCard extends HTMLElement {
               <div class="tl-head">
                 <span class="section-label" id="tl-range">—</span>
                 <div class="tl-tools">
+                  <div class="stream-ctrl-bar" id="stream-ctrl-bar"></div>
                   <button class="tool" id="now-btn" title="Jump to now">⟳</button>
                   <button class="tool" id="filter-btn" title="Filter">${ICONS.filter}</button>
                   <button class="tool" id="cal-btn" title="Calendar">${ICONS.calendar}</button>
@@ -1760,7 +2092,6 @@ class FrigateModernHassCard extends HTMLElement {
             <!-- info: sits below timeline in col-left -->
             <div class="info-row">
               <div><div class="info-title" id="info-title">${title}</div><div class="info-sub">${sub}</div></div>
-              <div class="stream-ctrl-bar" id="stream-ctrl-bar"></div>
               <div class="stats">
                 <div class="stat"><div class="sv" id="ev-count">—</div><div class="sl">Events</div></div>
                 <div class="stat"><div class="sv" id="on-dot" style="color:#4ade80">●</div><div class="sl" id="on-lbl">Online</div></div>
@@ -1860,7 +2191,16 @@ class FrigateModernHassCard extends HTMLElement {
       card.classList.toggle('wide', wide);
       card.classList.toggle('mobile', mobile);
       this._applyBrowse();
+      this._applyEventsCollapsed();
       if (wide) this._syncColHeight();
+      // Crossing a width where the automatic column count changes (rotating a
+      // phone, resizing a window) needs the grid rebuilt: the number of
+      // placeholder tiles depends on it. Only on an actual change, since this
+      // reconnects every stream.
+      if (this._viewMode === 'grid' && this._gridCols
+          && this._gridColumns(this._config.cameras.length) !== this._gridCols) {
+        this._mountGrid();
+      }
     });
     this._ro.observe(this);
   }
@@ -1889,14 +2229,14 @@ class FrigateModernHassCard extends HTMLElement {
       const ok = this._hass?.states[c.entity]?.state !== 'unavailable';
       return `<button class="cam-tab ${active?'active':''}" data-camidx="${i}"><span class="cam-dot" style="color:${ok?'#4ade80':'#ef4444'}">●</span> ${name}</button>`;
     }).join('');
-    const gridActive = this._viewMode === 'grid';
-    el.innerHTML = `<div class="cam-tabs">${tabs}<button class="cam-tab${gridActive?' active':''}" data-viewmode="grid" title="All cameras">${ICONS.grid} Multiview</button></div>
+    el.innerHTML = `<div class="cam-tabs">${tabs}</div>
       <button class="cam-rotate ${this._rotateTimer?'on':''}" id="rotate-btn" title="Auto-rotate">${ICONS.rotate}</button>`;
   }
 
   // ── interactions ──────────────────────────────────────────
   _click(e) {
     if (e.target.closest('#back')) return this._showLive();
+    if (e.target.closest('#sc-grid')) return this._setViewMode(this._viewMode === 'grid' ? 'single' : 'grid');
     if (e.target.closest('#sc-fs')) {
       const target = this._viewMode === 'grid'
         ? this.shadowRoot.querySelector('#cam-grid')
@@ -1907,6 +2247,7 @@ class FrigateModernHassCard extends HTMLElement {
     if (e.target.closest('#cal-btn')) return this._toggleCal();
     if (e.target.closest('#now-btn')) return this._goNow();
     if (e.target.closest('#browse-toggle')) return this._toggleBrowse();
+    if (e.target.closest('#sc-events')) return this._toggleEvents();
     if (e.target.closest('#rotate-btn')) return this._toggleRotate();
     if (e.target.closest('[data-mark-all]')) return this._markAll();
     if (e.target.closest('[data-toggle-reviewed]')) { this._showReviewed=!this._showReviewed; this._renderList(); return; }
@@ -2372,9 +2713,40 @@ class FrigateModernHassCard extends HTMLElement {
     track.addEventListener('mousedown',e=>{e.preventDefault();dn(e.clientX);});
     window.addEventListener('mousemove',e=>mv(e.clientX));
     window.addEventListener('mouseup',up);
-    track.addEventListener('touchstart',e=>dn(e.touches[0].clientX),{passive:true});
-    track.addEventListener('touchmove',e=>mv(e.touches[0].clientX),{passive:true});
-    track.addEventListener('touchend',up);
+    // Pinch to zoom the window, the touch counterpart of the wheel below. One
+    // finger pans, two zoom, and the moment the second finger lands the pan is
+    // abandoned so the window does not jump. The time under the fingers stays
+    // put, which is what makes a pinch feel like it is zooming and not sliding.
+    const gap=(a,b)=>Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
+    let pinch=null;
+    const settle=()=>{clearTimeout(this._wt);this._wt=setTimeout(()=>this._loadWindow(true),350);};
+    track.addEventListener('touchstart',e=>{
+      if(e.touches.length===2){
+        drag=false;track.classList.remove('grab');
+        const rect=track.getBoundingClientRect();
+        const midX=(e.touches[0].clientX+e.touches[1].clientX)/2;
+        const frac=Math.min(1,Math.max(0,(midX-rect.left)/rect.width));
+        const span=this._winEnd-this._winStart;
+        pinch={d0:gap(e.touches[0],e.touches[1])||1,span0:span,anchor:this._winStart+span*frac,frac};
+      } else { pinch=null; dn(e.touches[0].clientX); }
+    },{passive:true});
+    track.addEventListener('touchmove',e=>{
+      if(pinch&&e.touches.length===2){
+        e.preventDefault(); // otherwise the browser zooms the page instead
+        const d=gap(e.touches[0],e.touches[1])||1;
+        let nsp=Math.round(pinch.span0*(pinch.d0/d));
+        nsp=Math.max(300,Math.min(14*DAY,nsp)); // same limits as the wheel
+        let ns=Math.round(pinch.anchor-nsp*pinch.frac),ne=ns+nsp;
+        const now=Math.floor(Date.now()/1000);
+        if(ne>now){const a=ne-now;ne-=a;ns-=a;}
+        this._winStart=ns;this._winEnd=ne;this._exhausted=false;
+        this._renderTimeline();this._renderRange();
+      } else if(!pinch) mv(e.touches[0].clientX);
+    },{passive:false});
+    track.addEventListener('touchend',e=>{
+      if(pinch){ if(e.touches.length<2){pinch=null;settle();} return; }
+      up();
+    });
     track.addEventListener('wheel',e=>{
       e.preventDefault();
       const rect=track.getBoundingClientRect();const frac=Math.min(1,Math.max(0,(e.clientX-rect.left)/rect.width));
@@ -2386,7 +2758,7 @@ class FrigateModernHassCard extends HTMLElement {
       if(ne>now){const a=ne-now;ne-=a;ns-=a;}
       this._winStart=ns;this._winEnd=ne;this._exhausted=false;
       this._renderTimeline();this._renderRange();
-      clearTimeout(this._wt);this._wt=setTimeout(()=>this._loadWindow(true),350);
+      settle();
     },{passive:false});
   }
   _wireScroll() {
@@ -2613,13 +2985,29 @@ class FrigateModernHassCardEditor extends HTMLElement {
 
     const opts = (sel) => entityList.map(e => `<option value="${e}" ${e===sel?'selected':''}>${e}</option>`).join('');
 
+    const layoutId = this._config?.grid_layout || 'auto';
+    const usingLayout = layoutId !== 'auto';
+    // Offering a layout with fewer tiles than there are cameras is just wrong,
+    // so hide those. If nothing is big enough, show everything rather than an
+    // empty picker.
+    const fitting = GRID_LAYOUTS.filter(l => l.id === 'auto' || l.tiles >= cams.length);
+    const layoutChoices = fitting.length > 1 ? fitting : GRID_LAYOUTS;
+    // The tile number leads the row, so you read "tile 1 shows this camera",
+    // which is the direction people think in. Picking a camera that already
+    // sits in another tile swaps the two, so choosing is also positioning and
+    // no separate reorder control is needed.
     const camRows = cams.map((c,i) => `
       <div class="cr" data-row="${i}">
+        <span class="cnum" title="Tile ${i+1} in the grid">${i+1}</span>
         <select name="cam-entity-${i}" class="ce" data-cam-entity="${i}">
-          <option value="">— select camera —</option>
+          <option value="">Select camera</option>
           ${opts(c.entity||'')}
         </select>
         <input type="text" name="cam-name-${i}" class="cn" data-cam-name="${i}" placeholder="Display name (optional)" value="${c.name||''}">
+        ${usingLayout ? '' : `
+        <select class="cs" data-cam-span="${i}" title="Tile size in the grid">
+          ${[1,2,3].map(v => `<option value="${v}" ${Number(c.span?.cols ?? c.span ?? 1)===v?'selected':''}>${v}x${v}</option>`).join('')}
+        </select>`}
         ${cams.length > 1 ? `<button class="xb" data-remove-cam="${i}" title="Remove">✕</button>` : ''}
       </div>`).join('');
 
@@ -2633,24 +3021,67 @@ class FrigateModernHassCardEditor extends HTMLElement {
     const multiCam = cams.length > 1 || (cams.length === 1 && !cams[0].entity);
 
     this.innerHTML = `<style>
-      .ed-wrap{display:flex;flex-direction:column;gap:14px;padding:6px 2px;font-family:sans-serif;}
-      .field-label{font-size:12px;font-weight:600;margin-bottom:4px;display:block;color:#374151;}
-      .section{border-top:1px solid #e5e7eb;padding-top:12px;}
+      /* The editor lives in Home Assistant's own dialog, not in a shadow root of
+         ours, so it has to follow the user's theme. Fixed colours here meant an
+         unreadable panel on every dark theme. Each variable keeps a light
+         fallback for the rare theme that does not define it. */
+      .ed-wrap{display:flex;flex-direction:column;gap:14px;padding:6px 2px;
+        font-family:var(--paper-font-body1_-_font-family,sans-serif);
+        color:var(--primary-text-color,#111);
+        --ed-dim:var(--secondary-text-color,#6b7280);
+        --ed-line:var(--divider-color,#e5e7eb);
+        --ed-field:var(--card-background-color,#fff);
+        --ed-acc:var(--primary-color,#3b82f6);}
+      .field-label{font-size:12px;font-weight:600;margin-bottom:4px;display:block;color:var(--primary-text-color,#111);}
+      .section{border-top:1px solid var(--ed-line);padding-top:12px;}
+      .hint{color:var(--ed-dim);font-size:11px;}
       .cr{display:flex;gap:5px;align-items:center;margin-bottom:6px;}
-      .ce,.cn{flex:1;padding:7px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;box-sizing:border-box;background:#fff;color:#111;}
-      .ce{min-width:0;} .cn{min-width:0;}
-      .xb{padding:5px 8px;border:1px solid #f87171;background:#fee2e2;color:#b91c1c;border-radius:6px;cursor:pointer;font-size:12px;flex-shrink:0;}
-      .add-btn{padding:6px 12px;border:1px solid #93c5fd;background:rgba(59,130,246,.1);color:#3b82f6;border-radius:7px;cursor:pointer;font-size:12px;margin-top:2px;}
-      .tf{width:100%;padding:7px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;box-sizing:border-box;background:#fff;color:#111;}
+      .ce,.cn,.tf,.cs{border:1px solid var(--ed-line);border-radius:6px;font-size:12px;
+        background:var(--ed-field);color:var(--primary-text-color,#111);box-sizing:border-box;}
+      .ce,.cn{flex:1;padding:7px;min-width:0;}
+      .tf{width:100%;padding:7px;}
+      .cs{padding:7px 4px;flex-shrink:0;}
+      .xb{padding:5px 8px;border:1px solid var(--error-color,#f87171);background:transparent;
+        color:var(--error-color,#b91c1c);border-radius:6px;cursor:pointer;font-size:12px;flex-shrink:0;}
+      .add-btn{padding:6px 12px;border:1px solid var(--ed-acc);background:transparent;color:var(--ed-acc);
+        border-radius:7px;cursor:pointer;font-size:12px;margin-top:2px;}
       .radio-row,.chk-row{display:flex;gap:14px;flex-wrap:wrap;}
-      .radio-lbl,.chk-lbl{display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:#374151;}
+      .radio-lbl,.chk-lbl{display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:var(--primary-text-color,#111);}
       .chk-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;}
+      .cnum{width:26px;height:26px;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+        background:transparent;color:var(--ed-acc);border:1px solid var(--ed-acc);border-radius:6px;font-size:11px;font-weight:700;}
+      .lay-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(74px,1fr));gap:8px;margin:4px 0 8px;}
+      .lay{padding:6px 5px 5px;border:1px solid var(--ed-line);border-radius:8px;background:transparent;
+        color:inherit;cursor:pointer;display:flex;flex-direction:column;gap:4px;align-items:center;}
+      .lay:hover{border-color:var(--ed-acc);}
+      .lay.sel{border-color:var(--ed-acc);box-shadow:0 0 0 1px var(--ed-acc) inset;}
+      .lay-prev{width:100%;aspect-ratio:4/3;display:grid;gap:2px;grid-auto-flow:dense;grid-auto-rows:1fr;}
+      /* Neutral grey reads on a light and a dark theme alike. */
+      .lay-prev span{background:rgba(128,128,128,.35);border-radius:2px;display:flex;align-items:center;
+        justify-content:center;font-size:9px;color:var(--primary-text-color,#475569);font-weight:700;}
+      .lay.sel .lay-prev span{background:var(--ed-acc);color:var(--text-primary-color,#fff);}
+      .lay-auto{width:100%;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;
+        color:var(--ed-dim);font-size:10px;text-align:center;border:1px dashed var(--ed-line);border-radius:4px;}
+      .lay-lbl{font-size:10px;color:var(--primary-text-color,#374151);text-align:center;line-height:1.2;}
     </style>
     <div class="ed-wrap">
       <div>
-        <span class="field-label">Cameras (up to 4) ${frigEntities.length ? '<small style="font-weight:400;color:#6b7280">· Frigate cameras detected</small>' : ''}</span>
+        <span class="field-label">Cameras ${frigEntities.length ? '<small class="hint" style="font-weight:400">· Frigate cameras detected</small>' : ''}</span>
         <div id="cam-list">${camRows}</div>
-        ${cams.length < 4 ? `<button class="add-btn" id="add-cam">+ Add camera</button>` : ''}
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <button class="add-btn" id="add-cam">+ Add camera</button>
+          <button class="add-btn" id="toggle-layout">Grid layout${usingLayout ? `: ${findLayout(layoutId)?.label || ''}` : ''}</button>
+        </div>
+        ${cams.length > 1 ? '<small class="hint" style="display:block;margin-top:4px">The number is the tile the camera fills in the grid. Pick a camera that is already in another tile to swap the two.</small>' : ''}
+        ${cams.length > 4 ? '<small class="hint" style="display:block;margin-top:4px">Every camera in the grid streams at once, so more cameras means more load on the browser and on Frigate.</small>' : ''}
+        <div id="layout-picker" style="display:${this._layoutOpen ? 'block' : 'none'};margin-top:8px">
+          <div class="lay-grid">${layoutChoices.map(l => this._layoutButton(l, layoutId)).join('')}</div>
+          <small class="hint">The numbers match the tile numbers beside each camera above. A layout sets the columns and the tile sizes together.</small>
+          <div style="border-top:1px solid var(--divider-color);margin-top:10px;padding-top:8px">
+            <label class="chk-lbl"><input type="checkbox" name="stack_on_mobile" id="stack_on_mobile" ${this._config?.stack_on_mobile!==false?'checked':''}> On a phone, stack the cameras one per row</label>
+            <small class="hint" style="display:block;margin-top:4px">Any layout leaves the cameras too small to see on a phone, so this overrides it there. Turn it off to keep the grid on a phone too, for two cameras side by side or a small overview.</small>
+          </div>
+        </div>
       </div>
 
       <label><span class="field-label">Title (optional)</span>
@@ -2659,40 +3090,6 @@ class FrigateModernHassCardEditor extends HTMLElement {
       <label><span class="field-label">Subtitle</span>
         <input name="subtitle" class="tf" id="subtitle" type="text" value="${this._config?.subtitle||''}" placeholder="Frigate">
       </label>
-
-      <div class="section">
-        <span class="field-label">Colors</span>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px;">
-          <div>
-            <label class="chk-lbl" style="margin-bottom:4px">
-              <input type="checkbox" id="use_accent" ${this._config?.accent_color?'checked':''}> Custom accent
-            </label>
-            <div style="display:flex;align-items:center;gap:6px">
-              <input type="color" id="accent_color" value="${this._config?.accent_color||'#3b82f6'}" style="width:40px;height:30px;border:none;padding:2px;border-radius:6px;cursor:pointer">
-              <span style="font-size:11px;color:#6b7280" id="accent_lbl">${this._config?.accent_color||'#3b82f6'}</span>
-            </div>
-          </div>
-          <div>
-            <label class="chk-lbl" style="margin-bottom:4px">
-              <input type="checkbox" id="use_bg" ${this._config?.bg_color?'checked':''}> Custom background
-            </label>
-            <div style="display:flex;align-items:center;gap:6px">
-              <input type="color" id="bg_color" value="${this._config?.bg_color||'#1c2233'}" style="width:40px;height:30px;border:none;padding:2px;border-radius:6px;cursor:pointer">
-              <span style="font-size:11px;color:#6b7280" id="bg_lbl">${this._config?.bg_color||'#1c2233'}</span>
-            </div>
-          </div>
-        </div>
-        <small style="color:#6b7280;font-size:11px">Check the box to activate. Uncheck to revert to theme default.</small>
-      </div>
-
-      <div class="section">
-        <span class="field-label">Theme</span>
-        <div class="radio-row">
-          <label class="radio-lbl"><input type="radio" name="theme" value="dark"  ${(this._config?.theme||'dark')==='dark' ?'checked':''}> Dark</label>
-          <label class="radio-lbl"><input type="radio" name="theme" value="light" ${this._config?.theme==='light'?'checked':''}> Light</label>
-          <label class="radio-lbl"><input type="radio" name="theme" value="auto"  ${this._config?.theme==='auto' ?'checked':''}> Auto (browser)</label>
-        </div>
-      </div>
 
       <div class="section">
         <span class="field-label">View</span>
@@ -2704,10 +3101,42 @@ class FrigateModernHassCardEditor extends HTMLElement {
           <label class="chk-lbl"><input type="checkbox" name="rotate_on_load" id="rotate_on_load" ${rotateOnLoad?'checked':''}> Auto-rotate on load</label>
         </div>
         <div style="margin-top:6px">
-          <label><span style="font-size:11px;color:#6b7280">Rotate interval (seconds, 0 = use default ${DEFAULT_ROTATE_S}s)</span>
+          <label><span class="hint">Rotate interval (seconds, 0 = use default ${DEFAULT_ROTATE_S}s)</span>
             <input name="rotate_seconds" class="tf" id="rotate_seconds" type="number" value="${this._config?.rotate_seconds??0}" min="0" style="margin-top:3px">
           </label>
         </div>
+      </div>
+      <div class="section">
+        <span class="field-label">Theme</span>
+        <div class="radio-row">
+          <label class="radio-lbl"><input type="radio" name="theme" value="dark"  ${(this._config?.theme||'dark')==='dark' ?'checked':''}> Dark</label>
+          <label class="radio-lbl"><input type="radio" name="theme" value="light" ${this._config?.theme==='light'?'checked':''}> Light</label>
+          <label class="radio-lbl"><input type="radio" name="theme" value="auto"  ${this._config?.theme==='auto' ?'checked':''}> Auto (browser)</label>
+        </div>
+      </div>
+      <div class="section">
+        <span class="field-label">Colors</span>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px;">
+          <div>
+            <label class="chk-lbl" style="margin-bottom:4px">
+              <input type="checkbox" id="use_accent" ${this._config?.accent_color?'checked':''}> Custom accent
+            </label>
+            <div style="display:flex;align-items:center;gap:6px">
+              <input type="color" id="accent_color" value="${this._config?.accent_color||'#3b82f6'}" style="width:40px;height:30px;border:none;padding:2px;border-radius:6px;cursor:pointer">
+              <span class="hint" id="accent_lbl">${this._config?.accent_color||'#3b82f6'}</span>
+            </div>
+          </div>
+          <div>
+            <label class="chk-lbl" style="margin-bottom:4px">
+              <input type="checkbox" id="use_bg" ${this._config?.bg_color?'checked':''}> Custom background
+            </label>
+            <div style="display:flex;align-items:center;gap:6px">
+              <input type="color" id="bg_color" value="${this._config?.bg_color||'#1c2233'}" style="width:40px;height:30px;border:none;padding:2px;border-radius:6px;cursor:pointer">
+              <span class="hint" id="bg_lbl">${this._config?.bg_color||'#1c2233'}</span>
+            </div>
+          </div>
+        </div>
+        <small class="hint">Check the box to activate. Uncheck to revert to theme default.</small>
       </div>
 
       <div class="section">
@@ -2721,13 +3150,32 @@ class FrigateModernHassCardEditor extends HTMLElement {
         </div>
       </div>
 
+      <div class="section" ${usingLayout ? 'style="display:none"' : ''}>
+        <span class="field-label">Grid columns</span>
+        <div class="radio-row">
+          <label class="radio-lbl"><input type="radio" name="grid_columns" value="auto" ${(this._config?.grid_columns||'auto')==='auto'?'checked':''}> Automatic</label>
+          <label class="radio-lbl"><input type="radio" name="grid_columns" value="1" ${String(this._config?.grid_columns)==='1'?'checked':''}> 1 (stacked)</label>
+          <label class="radio-lbl"><input type="radio" name="grid_columns" value="2" ${String(this._config?.grid_columns)==='2'?'checked':''}> 2</label>
+          <label class="radio-lbl"><input type="radio" name="grid_columns" value="3" ${String(this._config?.grid_columns)==='3'?'checked':''}> 3</label>
+          <label class="radio-lbl"><input type="radio" name="grid_columns" value="4" ${String(this._config?.grid_columns)==='4'?'checked':''}> 4</label>
+        </div>
+        <small class="hint">A camera can occupy more than one tile, so one can be shown larger than the rest. Automatic picks a column count from the number of cameras and the space available: on a tablet that comes to <b>${this._colsAt(800, cams.length)}</b> per row. A phone stacks regardless, see below.</small>
+      </div>
+
+      <div class="section">
+        <span class="field-label">Events panel</span>
+        <label class="chk-lbl"><input type="checkbox" name="events_collapsed" id="events_collapsed" ${this._config?.events_collapsed===true?'checked':''}> Start with the events panel hidden</label>
+        <small class="hint" style="display:block;margin-top:4px">On a wide card the events list sits beside the cameras. Hiding it gives the cameras the full width; a button on the card slides it back in.</small>
+      </div>
+      </div>
+
       <div class="section">
         <span class="field-label">Live view provider</span>
         <div class="radio-row">
           <label class="radio-lbl"><input type="radio" name="live_provider" value="hls" ${(this._config?.live_provider||'hls')==='hls'?'checked':''}> Home Assistant stream</label>
-          <label class="radio-lbl"><input type="radio" name="live_provider" value="go2rtc" ${this._config?.live_provider==='go2rtc'?'checked':''}> go2rtc — low latency (experimental)</label>
+          <label class="radio-lbl"><input type="radio" name="live_provider" value="go2rtc" ${this._config?.live_provider==='go2rtc'?'checked':''}> go2rtc, low latency (experimental)</label>
         </div>
-        <small style="color:#6b7280;font-size:11px">go2rtc streams via Frigate's built-in WebRTC/MSE for much lower latency. Falls back to the Home Assistant stream automatically if it can't connect.</small>
+        <small class="hint">go2rtc streams via Frigate's built-in WebRTC/MSE for much lower latency. Falls back to the Home Assistant stream automatically if it can't connect.</small>
         <div style="margin-top:8px">
           <span class="field-label">go2rtc transport</span>
           <div class="radio-row">
@@ -2735,16 +3183,16 @@ class FrigateModernHassCardEditor extends HTMLElement {
             <label class="radio-lbl"><input type="radio" name="go2rtc_mode" value="webrtc" ${this._config?.go2rtc_mode==='webrtc'?'checked':''}> WebRTC only</label>
             <label class="radio-lbl"><input type="radio" name="go2rtc_mode" value="auto" ${this._config?.go2rtc_mode==='auto'?'checked':''}> Automatic</label>
           </div>
-          <small style="color:#6b7280;font-size:11px">MSE runs entirely over the proxied connection, so it works remotely and in the companion apps. WebRTC can be marginally faster but connects directly to go2rtc, which usually only resolves on the local network.</small>
+          <small class="hint">MSE runs entirely over the proxied connection, so it works remotely and in the companion apps. WebRTC can be marginally faster but connects directly to go2rtc, which usually only resolves on the local network.</small>
         </div>
       </div>
 
       <div class="section">
-        <span class="field-label">Stream height limit (vh)</span>
+        <span class="field-label">Maximum camera height</span>
         <input name="stream_height" class="tf" id="stream_height" type="number"
           value="${this._config?.stream_height||''}" min="20" max="100"
-          placeholder="70 = grid default, blank = auto">
-        <small style="color:#6b7280;font-size:11px">Grid view defaults to 70vh. Set here to override for both views.</small>
+          placeholder="e.g. 70, blank = automatic">
+        <small class="hint">As a percentage of the screen height. Leave empty to let the cameras size themselves; a grid uses at most 70% by default. Raise it for a wall display.</small>
       </div>
 
       <div class="section">
@@ -2762,6 +3210,32 @@ class FrigateModernHassCardEditor extends HTMLElement {
       const cur = this._getCams(); cur.splice(Number(e.currentTarget.dataset.removeCam), 1);
       this._config = { ...this._config, cameras: cur }; delete this._config.camera_entity; this._render(); this._dispatch();
     }));
+    this.querySelector('#toggle-layout')?.addEventListener('click', () => {
+      this._layoutOpen = !this._layoutOpen; this._render();
+    });
+    // Picking a camera that is already shown in another tile moves it here and
+    // sends whatever stood here back to the tile it came from. Without this you
+    // would end up with the same camera twice and no way to place it. Runs
+    // before the generic change handler so it can take over the update.
+    this.querySelectorAll('[data-cam-entity]').forEach(el => el.addEventListener('change', ev => {
+      const i = Number(ev.currentTarget.dataset.camEntity);
+      const picked = ev.currentTarget.value;
+      if (!picked) return;
+      const before = cams;
+      const j = before.findIndex((c, k) => k !== i && c.entity === picked);
+      if (j < 0) return; // not in use elsewhere, nothing to swap
+      ev.stopImmediatePropagation();
+      const cur = this._getCams(); // keeps the sizes, which belong to the tile
+      const nameOf = k => before[k]?.name || '';
+      cur[i] = { ...cur[i], entity: picked, name: nameOf(j) };
+      cur[j] = { ...cur[j], entity: before[i]?.entity || '', name: nameOf(i) };
+      this._config = { ...this._config, cameras: cur }; delete this._config.camera_entity;
+      this._render(); this._dispatch();
+    }));
+    this.querySelectorAll('[data-layout]').forEach(b => b.addEventListener('click', () => {
+      this._config = { ...this._config, grid_layout: b.dataset.layout };
+      this._render(); this._dispatch();
+    }));
     this.querySelectorAll('select,input').forEach(el => el.addEventListener('change', () => this._u()));
     // prevent click outside from closing select while user is choosing
     this.querySelectorAll('select').forEach(sel => sel.addEventListener('mousedown', e => e.stopPropagation()));
@@ -2773,12 +3247,50 @@ class FrigateModernHassCardEditor extends HTMLElement {
     });
   }
 
+  // What the current settings produce at a given card width. The card does this
+  // same sum; showing it beats making someone resize a phone to find out.
+  _colsAt(width, camCount) {
+    if (this._config?.stack_on_mobile !== false && width < 500) return '1 camera';
+    const min = Number(this._config?.min_tile_width) > 0 ? Number(this._config.min_tile_width) : 200;
+    const layout = findLayout(this._config?.grid_layout || 'auto');
+    const pinned = Number(this._config?.grid_columns);
+    let cols = layout && layout.cols ? layout.cols
+      : (pinned > 0 ? pinned
+      : (camCount <= 1 ? 1 : camCount <= 4 ? 2 : camCount <= 9 ? 3 : 4));
+    cols = Math.max(1, Math.min(cols, Math.floor(width / min)));
+    return cols === 1 ? '1 camera' : `${cols} cameras`;
+  }
+
+  // Draw a layout as numbered cells. Seeing the shape is the point; a written
+  // span tells nobody what they will end up with.
+  _layoutButton(l, selected) {
+    const sel = l.id === selected ? ' sel' : '';
+    if (l.id === 'auto') {
+      return `<button type="button" class="lay${sel}" data-layout="auto">
+        <div class="lay-auto">fits the<br>camera count</div>
+        <div class="lay-lbl">${l.label}</div></button>`;
+    }
+    const cells = Array.from({ length: l.tiles }, (_, i) => {
+      const sp = l.spans[i];
+      const style = sp ? ` style="grid-column:span ${sp[0]};grid-row:span ${sp[1]}"` : '';
+      return `<span${style}>${i + 1}</span>`;
+    }).join('');
+    return `<button type="button" class="lay${sel}" data-layout="${l.id}">
+      <div class="lay-prev" style="grid-template-columns:repeat(${l.cols},1fr)">${cells}</div>
+      <div class="lay-lbl">${l.label}</div></button>`;
+  }
+
   _getCams() {
     const rows = [...this.querySelectorAll('[data-row]')];
-    return rows.map(r => ({
-      entity: r.querySelector('[data-cam-entity]')?.value || '',
-      name: r.querySelector('[data-cam-name]')?.value || '',
-    }));
+    return rows.map(r => {
+      const span = Number(r.querySelector('[data-cam-span]')?.value || 1);
+      return {
+        entity: r.querySelector('[data-cam-entity]')?.value || '',
+        name: r.querySelector('[data-cam-name]')?.value || '',
+        // Only carry a size when it is not the default, to keep configs clean.
+        ...(span > 1 ? { span } : {}),
+      };
+    });
   }
   _u() {
     const g = id => this.querySelector('#'+id)?.value?.trim() || '';
@@ -2809,6 +3321,11 @@ class FrigateModernHassCardEditor extends HTMLElement {
     c.hidden_tabs = hidden.length ? hidden : [];
     const sh = this.querySelector('#stream_height')?.value;
     c.stream_height = sh ? Number(sh) : null;
+    c.events_collapsed = this.querySelector('#events_collapsed')?.checked === true;
+    if (this._config?.grid_layout) c.grid_layout = this._config.grid_layout;
+    const gc = this.querySelector('input[name="grid_columns"]:checked')?.value || 'auto';
+    c.grid_columns = gc === 'auto' ? 'auto' : Number(gc);
+    c.stack_on_mobile = this.querySelector('#stack_on_mobile')?.checked !== false;
     c.live_provider = this.querySelector('input[name="live_provider"]:checked')?.value === 'go2rtc' ? 'go2rtc' : 'hls';
     c.go2rtc_mode = this.querySelector('input[name="go2rtc_mode"]:checked')?.value || 'mse';
     this._config=c; this._dispatch();
