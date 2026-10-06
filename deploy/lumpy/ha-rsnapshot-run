@@ -26,7 +26,7 @@ fi
 mkdir -p "$RUNDIR" || exit 1
 
 STARTED=$(date +%s)
-rsnapshot -c "$CONF" "$LEVEL"
+ionice -c2 -n7 nice -n 19 rsnapshot -c "$CONF" "$LEVEL"
 RC=$?
 ENDED=$(date +%s)
 DURATION=$(( ENDED - STARTED ))
