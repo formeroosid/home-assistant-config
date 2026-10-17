@@ -1,0 +1,37 @@
+# Music Assistant on whitey — Portainer stack "music-assistant".
+# INTENDED configuration (runbook §4f). Reconcile against the live stack
+# before relying on this file:
+#   docker inspect music-assistant --format '{{.Config.User}} {{.Config.Env}}'
+# Last observed live state (2026-09-09): uid=1000 gid=1001.
+#
+# - host networking is mandatory (mDNS/UPnP discovery; AirPlay random ports)
+# - runs as UID 1000 = jgordon on whitey AND lumpy, which owns the NFS music tree
+# - GID 1001 is "media" on lumpy but "hamon" on whitey; add group_add only if
+#   lumpy holds music files not owned by UID 1000:
+#     find /data/Media/Music ! -uid 1000 -printf '%u:%g %p\n' | head
+# - /data and /cache must both be mounted and owned by the run UID
+# - pin the tag; never switch stable <-> beta by changing it
+services:
+  music-assistant:
+    image: ghcr.io/music-assistant/server:2.10.0
+    container_name: music-assistant
+    network_mode: host
+    restart: unless-stopped
+    user: "1000:1000"
+    # group_add:
+    #   - "1001"
+    volumes:
+      - /srv/whitey-r6/VarData/Docker-data/MusicAssistant/data:/data:rw
+      - /srv/whitey-r6/VarData/Docker-data/MusicAssistant/cache:/cache:rw
+      - /mnt/lumpy/music:/media/music:ro
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - TZ=America/Los_Angeles
+      - LOG_LEVEL=info
+      - HOME=/data
+      - XDG_CACHE_HOME=/cache
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
