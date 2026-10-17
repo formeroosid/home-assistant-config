@@ -1,0 +1,6 @@
+# Append to /etc/fstab on whitey. Runbook §4f.
+# No x-systemd.automount: a container bind mount of an untriggered autofs path
+# sees an empty directory. Docker waits for this mount via
+# /etc/systemd/system/docker.service.d/10-nfs-mounts.conf instead.
+# Lumpy music library (read-only source for Music Assistant)
+192.168.86.100:/data/Media/Music  /mnt/lumpy/music  nfs  ro,nofail,_netdev,soft,timeo=100,retrans=3,x-systemd.mount-timeout=30  0  0
