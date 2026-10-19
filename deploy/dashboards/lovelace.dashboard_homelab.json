@@ -209,7 +209,7 @@
               "type": "heading"
             },
             {
-              "content": "{%- set e = 'sensor.larry_metrics' %}\n**{{ state_attr(e,'os') }}** \u00b7 kernel `{{ state_attr(e,'kernel') }}`\n{%- if state_attr(e,'reboot_required') %} \u00b7 \u26a0\ufe0f **reboot required**{% endif %}\n\nUp **{{ (state_attr(e,'uptime_s') | int(0) / 86400) | round(1) }}** days \u00b7 load **{{ state_attr(e,'load1') }}** / {{ state_attr(e,'cores') }} cores \u00b7 mem **{{ state_attr(e,'mem_pct') }}%**\n\n| Mount | Size | Used |\n|---|---:|---:|\n{% for f in state_attr(e,'filesystems') or [] %}| `{{ f.mount }}` | {% if f.total > 1024**4 %}{{ (f.total / 1024**4) | round(2) }} TB{% else %}{{ (f.total / 1024**3) | round(1) }} GB{% endif %} | {{ f.pct }}% |\n{% endfor %}\n",
+              "content": "{%- set e = 'sensor.larry_metrics' %}\n**{{ state_attr(e,'os') }}** \u00b7 kernel `{{ state_attr(e,'kernel') }}`\n{%- if state_attr(e,'reboot_required') %} \u00b7 \u26a0\ufe0f **reboot required**{% endif %}\n\n{% set gpu = state_attr(e, 'gpu_util_pct') %}\nUp **{{ (state_attr(e,'uptime_s') | int(0) / 86400) | round(1) }}** days \u00b7 load **{{ state_attr(e,'load1') }}** / {{ state_attr(e,'cores') }} cores \u00b7 mem **{{ state_attr(e,'mem_pct') }}%** \u00b7 GPU {% if is_number(gpu) %}{{ gpu | float | round(0) | int }}%{% else %}unavailable{% endif %}\n\n| Mount | Size | Used |\n|---|---:|---:|\n{% for f in state_attr(e,'filesystems') or [] %}| `{{ f.mount }}` | {% if f.total > 1024**4 %}{{ (f.total / 1024**4) | round(2) }} TB{% else %}{{ (f.total / 1024**3) | round(1) }} GB{% endif %} | {{ f.pct }}% |\n{% endfor %}\n",
               "type": "markdown"
             }
           ],
