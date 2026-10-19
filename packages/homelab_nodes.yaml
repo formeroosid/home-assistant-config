@@ -15,6 +15,7 @@ command_line:
         - load15
         - cores
         - mem_pct
+        - gpu_util_pct
         - kernel
         - os
         - updates
