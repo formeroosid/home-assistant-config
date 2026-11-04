@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+mkdir -p /srv/docker/plex/config/db-dump
+docker exec plex sh -c '"/usr/lib/plexmediaserver/Plex SQLite" \
+  "/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db" \
+  ".backup /config/db-dump/library.db"'

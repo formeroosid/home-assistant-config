@@ -1,0 +1,7 @@
+/plex/config/Library/Application Support/Plex Media Server/Cache/
+/plex/config/Library/Application Support/Plex Media Server/Media/localhost/
+/plex/config/Transcode/
+/jellyfin/cache/
+/jellyfin/transcodes/
+/jellyfin/config/data/subtitles/
+/VarData/beets/incoming/
