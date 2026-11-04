@@ -1,1 +1,86 @@
-[]
+- id: '1793738453090'
+  alias: Frigate - iPhone security alerts
+  description: Send an iPhone notification with an object thumbnail when a Driveway,
+    Back_40, or Front_Door review item first becomes an alert. Tapping opens that
+    camera's review gallery in the Grassburg Cameras dashboard.
+  triggers:
+  - trigger: mqtt
+    topic: frigate/reviews
+  conditions:
+  - condition: template
+    value_template: "{% set p = trigger.payload_json %} {% set after = p.get('after')
+      or {} %} {% set before = p.get('before') or {} %} {{\n  after.get('severity')
+      == 'alert'\n  and after.get('camera') in [\n    'Driveway',\n    'Back_40',\n
+      \   'Front_Door'\n  ]\n  and (\n    p.get('type') == 'new'\n    or (\n      p.get('type')
+      == 'update'\n      and before.get('severity') != 'alert'\n    )\n  )\n}}"
+  actions:
+  - variables:
+      camera_id: '{{ trigger.payload_json[''after''][''camera''] }}'
+      review_id: '{{ trigger.payload_json[''after''][''id''] }}'
+      object_labels: "{{\n  trigger.payload_json['after']['data']\n  .get('objects',
+        [])\n  | sort\n  | join(', ')\n  | title\n}}"
+      detection_ids: "{{\n  trigger.payload_json['after']['data']\n  .get('detections',
+        [])\n}}"
+      camera_view: "{{\n  {\n    'Driveway': 'driveway',\n    'Back_40': 'back-40',\n
+        \   'Front_Door': 'front-door'\n  }[trigger.payload_json['after']['camera']]\n}}"
+  - variables:
+      notification_url: /grassburg-cameras/{{ camera_view }}?advanced-camera-card-action.reviews
+  - if:
+    - condition: template
+      value_template: '{{ detection_ids | length > 0 }}'
+    then:
+    - action: notify.mobile_app_iphone
+      data:
+        title: Frigate — {{ camera_id | replace('_', ' ') }}
+        message: '{{ object_labels if object_labels else ''Activity'' }} detected
+          on {{ camera_id | replace(''_'', '' '') }}.'
+        data:
+          tag: frigate-review-{{ review_id }}
+          image: /api/frigate/notifications/{{ detection_ids[0] }}/thumbnail.jpg
+          url: '{{ notification_url }}'
+    else:
+    - action: notify.mobile_app_iphone
+      data:
+        title: Frigate — {{ camera_id | replace('_', ' ') }}
+        message: '{{ object_labels if object_labels else ''Activity'' }} detected
+          on {{ camera_id | replace(''_'', '' '') }}.'
+        data:
+          tag: frigate-review-{{ review_id }}
+          url: '{{ notification_url }}'
+  trace:
+    stored_traces: 50
+  mode: queued
+  max: 10
+- id: '1793746045754'
+  alias: Homelab - Node offline iPhone alert
+  description: Notify the iPhone when a homelab node's connectivity sensor remains
+    off for five continuous minutes. Tapping the notification opens the Homelab Nodes
+    dashboard.
+  triggers:
+  - trigger: state
+    entity_id:
+    - binary_sensor.whitey_online
+    - binary_sensor.larry_online
+    - binary_sensor.lumpy_online
+    - binary_sensor.uther_online
+    to: 'off'
+    for:
+      minutes: 5
+  conditions: []
+  actions:
+  - variables:
+      node_name: "{{\n  {\n    'binary_sensor.whitey_online': 'Whitey',\n    'binary_sensor.larry_online':
+        'Larry',\n    'binary_sensor.lumpy_online': 'Lumpy',\n    'binary_sensor.uther_online':
+        'Uther'\n  }[trigger.entity_id]\n}}"
+  - action: notify.mobile_app_iphone
+    data:
+      title: Homelab — {{ node_name }} offline
+      message: '{{ node_name }} has been unreachable for at least 5 minutes. Tap to
+        open the Nodes dashboard.'
+      data:
+        tag: homelab-offline-{{ trigger.entity_id }}
+        url: /dashboard-homelab/nodes
+  trace:
+    stored_traces: 30
+  mode: queued
+  max: 10

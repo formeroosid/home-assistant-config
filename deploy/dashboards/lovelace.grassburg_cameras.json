@@ -1,0 +1,116 @@
+{
+  "title": "Grassburg Cameras",
+  "views": [
+    {
+      "cards": [
+        {
+          "cards": [
+            {
+              "cameras": [
+                {
+                  "camera_entity": "camera.driveway"
+                }
+              ],
+              "type": "custom:advanced-camera-card"
+            },
+            {
+              "cameras": [
+                {
+                  "camera_entity": "camera.back_40"
+                }
+              ],
+              "type": "custom:advanced-camera-card"
+            },
+            {
+              "cameras": [
+                {
+                  "camera_entity": "camera.front_door"
+                }
+              ],
+              "type": "custom:advanced-camera-card"
+            },
+            {
+              "cameras": [
+                {
+                  "camera_entity": "camera.fertile_crescent"
+                }
+              ],
+              "type": "custom:advanced-camera-card"
+            }
+          ],
+          "columns": 2,
+          "square": false,
+          "type": "grid"
+        }
+      ],
+      "icon": "mdi:cctv",
+      "path": "overview",
+      "title": "Overview",
+      "type": "panel"
+    },
+    {
+      "cards": [
+        {
+          "cameras": [
+            {
+              "camera_entity": "camera.driveway"
+            }
+          ],
+          "type": "custom:advanced-camera-card"
+        }
+      ],
+      "icon": "mdi:car",
+      "path": "driveway",
+      "title": "Driveway",
+      "type": "panel"
+    },
+    {
+      "cards": [
+        {
+          "cameras": [
+            {
+              "camera_entity": "camera.back_40"
+            }
+          ],
+          "type": "custom:advanced-camera-card"
+        }
+      ],
+      "icon": "mdi:tree",
+      "path": "back-40",
+      "title": "Back 40",
+      "type": "panel"
+    },
+    {
+      "cards": [
+        {
+          "cameras": [
+            {
+              "camera_entity": "camera.front_door"
+            }
+          ],
+          "type": "custom:advanced-camera-card"
+        }
+      ],
+      "icon": "mdi:door",
+      "path": "front-door",
+      "title": "Front Door",
+      "type": "panel"
+    },
+    {
+      "cards": [
+        {
+          "cameras": [
+            {
+              "camera_entity": "camera.fertile_crescent"
+            }
+          ],
+          "type": "custom:advanced-camera-card"
+        }
+      ],
+      "icon": "mdi:sprout",
+      "path": "fertile-crescent",
+      "title": "Fertile Crescent",
+      "type": "panel"
+    }
+  ]
+}
