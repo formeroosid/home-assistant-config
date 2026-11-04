@@ -471,7 +471,7 @@ Compare the public IP seen from the root namespace against the one seen from ins
 - different addresses \-\> tunnelled  
 - identical addresses \-\> **leak**
 
-Observed healthy values: vpn `173.239.198.63`, WAN `<home-wan-ip>`. Note the vpn address sits in the same `/24` as the tunnel endpoint `173.239.198.103`, which corroborates that the VPN path really is on PIA's network rather than merely being *different* from the WAN address.
+Observed healthy values: vpn `173.239.198.63`, WAN `<home-wan-ip>` (redacted; differs from the vpn address). Note the vpn address sits in the same `/24` as the tunnel endpoint `173.239.198.103`, which corroborates that the VPN path really is on PIA's network rather than merely being *different* from the WAN address.
 
 ### Status precedence
 
@@ -1036,7 +1036,7 @@ The **Lumpy rsnapshot card** (§4a) is a separate markdown card reading `state_a
 
 Repo: [**formeroosid/home-assistant-config**](https://github.com/formeroosid/home-assistant-config) (**public** — deliberately left public on 2026-11-04 after review).
 
-Because the repo is public, anything committed is published. The 2026-11-04 history review found no credentials (only the `hamon` public key and a host-key fingerprint), but it does carry the network layout, hostnames, email addresses, camera names and an observed WAN address in §4b. Keep secrets in `secrets.yaml`, `.env` files and 1Password, all gitignored, and check new snapshot targets for credentials before adding them.
+Because the repo is public, anything committed is published. The 2026-11-04 history review found no credentials (only the `hamon` public key and a host-key fingerprint), but it does carry the network layout, hostnames, email addresses, camera names and once carried the observed WAN address in §4b (replaced with a placeholder 2026-11-04; still present in earlier commits). Keep secrets in `secrets.yaml`, `.env` files and 1Password, all gitignored, and check new snapshot targets for credentials before adding them.
 
 `main` is protected against force pushes and deletion (enforced for admins). No pull-request or status-check requirement, because whitey pushes directly.
 
