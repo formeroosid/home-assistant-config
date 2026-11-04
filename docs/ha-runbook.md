@@ -1034,7 +1034,11 @@ The **Lumpy rsnapshot card** (§4a) is a separate markdown card reading `state_a
 
 ## 6a. Version control
 
-Repo: [**formeroosid/home-assistant-config**](https://github.com/formeroosid/home-assistant-config) (private).
+Repo: [**formeroosid/home-assistant-config**](https://github.com/formeroosid/home-assistant-config) (**public** — deliberately left public on 2026-11-04 after review).
+
+Because the repo is public, anything committed is published. The 2026-11-04 history review found no credentials (only the `hamon` public key and a host-key fingerprint), but it does carry the network layout, hostnames, email addresses, camera names and an observed WAN address in §4b. Keep secrets in `secrets.yaml`, `.env` files and 1Password, all gitignored, and check new snapshot targets for credentials before adding them.
+
+`main` is protected against force pushes and deletion (enforced for admins). No pull-request or status-check requirement, because whitey pushes directly.
 
 Authentication is a **deploy key**, not a PAT — no expiry, scoped to this one repo.
 
