@@ -1,18 +1,90 @@
 #!/usr/bin/env bash
-# Snapshot out-of-tree HA infrastructure files into the config repo and commit.
-# Safe to run repeatedly; commits only when something changed.
+# Snapshot out-of-tree HA infrastructure files into the config repo, commit,
+# reconcile with GitHub, and push. Safe to run repeatedly; commits only when
+# something changed, but always fetches, rebases and pushes so that commits
+# stranded by an earlier failure are delivered on the next run.
+#
+# Publishes its own result to /var/lib/ha-metrics/ha_git.json, which
+# ha-metrics inlines as extra.ha_git on sensor.whitey_metrics. A push that
+# stops working is therefore visible in HA instead of only in this log.
+#
+# Network problems remain non-fatal (exit 0): an internet outage must not
+# become a failed unit. Problems are reported through the state file.
 set -uo pipefail
 
 CFG=/srv/whitey-r6/VarData/Docker-data/HomeAssistant/config
 LOG=/var/log/ha_bkup/ha-config-commit.log
+STATE_DIR=/var/lib/ha-metrics
+STATE_FILE="$STATE_DIR/ha_git.json"
+LASTPUSH_FILE="$STATE_DIR/ha_git.lastpush"   # deliberately not *.json
+REMOTE=origin
+BRANCH=main
+GIT_ID=(-c user.name="Jamie Gordon" -c user.email="jamie@jamiegordon.net")
 export GIT_DIR="$CFG/.git" GIT_WORK_TREE="$CFG"
 
 log() { printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"; }
 
+# write_state <status> <detail>
+#   status: pushed | up_to_date | push_failed | fetch_failed |
+#           rebase_conflict | rebase_in_progress | commit_failed
+#   detail: short text without double quotes or backslashes
+write_state() {
+  local status=$1 detail=$2 now ahead behind head last_push ok tmp
+  now=$(date +%s)
+  ahead=$(git rev-list --count "$REMOTE/$BRANCH..HEAD" 2>/dev/null || echo -1)
+  behind=$(git rev-list --count "HEAD..$REMOTE/$BRANCH" 2>/dev/null || echo -1)
+  head=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+  last_push=$(cat "$LASTPUSH_FILE" 2>/dev/null || echo 0)
+  case "$last_push" in ''|*[!0-9]*) last_push=0 ;; esac
+  case "$status" in pushed|up_to_date) ok=true ;; *) ok=false ;; esac
+  # Temp name has a leading dot and does not end in .json, so ha-metrics
+  # can never pick up a half-written file.
+  tmp=$(mktemp "$STATE_DIR/.ha_git.json.XXXXXX") || { log "WARN: cannot write state file"; return; }
+  printf '{"ok":%s,"status":"%s","detail":"%s","ts":"%s","epoch":%s,"head":"%s","ahead":%s,"behind":%s,"last_push_epoch":%s}\n' \
+    "$ok" "$status" "$detail" "$(date -Is)" "$now" "$head" "$ahead" "$behind" "$last_push" > "$tmp"
+  chmod 644 "$tmp"
+  mv -f "$tmp" "$STATE_FILE"
+}
+
+# pull_host <ssh-host> <dest-dir> <label> <file>...
+#   Copies root-relative paths from a remote host in one ssh+tar connection.
+#   Non-fatal: if the host is unreachable the previous copies stay in place.
+#   Success is judged by the number of files received, not by tar's exit
+#   status, so one missing file no longer discards the others.
+pull_host() {
+  local host=$1 dest=$2 label=$3; shift 3
+  local expected=$# tmpd n=0 p
+  install -d -m 755 "$dest"
+  tmpd=$(mktemp -d) || { log "WARN: mktemp failed; skipped $host snapshot"; return; }
+  ssh -n -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
+      "$host" "tar -cf - -C / $*" 2>>"$LOG" | tar -xf - -C "$tmpd" 2>>"$LOG"
+  for p in "$@"; do
+    if [ -f "$tmpd/$p" ]; then
+      install -m 644 "$tmpd/$p" "$dest/$(basename "$p")"
+      n=$((n + 1))
+    fi
+  done
+  rm -rf "$tmpd"
+  if [ "$n" -eq 0 ]; then
+    log "WARN: could not pull $label files from $host; keeping previous copies"
+  else
+    log "$host: snapshotted $n of $expected $label files"
+    [ "$n" -eq "$expected" ] || log "WARN: $host returned only $n of $expected expected files"
+  fi
+}
+
 install -d -m 750 "$(dirname "$LOG")"
+install -d -m 755 "$STATE_DIR"
 cd "$CFG" || { log "FATAL: cannot cd $CFG"; exit 1; }
 
-# --- snapshot infrastructure files ------------------------------------------
+# --- refuse to touch a repo left mid-rebase by hand -------------------------
+if [ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ]; then
+  log "ERROR: a rebase is in progress in $CFG; skipping run until it is resolved"
+  write_state rebase_in_progress "manual rebase in progress on whitey"
+  exit 0
+fi
+
+# --- snapshot whitey infrastructure files -----------------------------------
 for f in ha-metrics ha-backup-sync ha-config-commit bkup-alert; do
   [ -f "/usr/local/sbin/$f" ] && install -m 644 "/usr/local/sbin/$f" "deploy/sbin/$f"
 done
@@ -23,91 +95,90 @@ done
 
 [ -f /etc/logrotate.d/ha_bkup ] && install -m 644 /etc/logrotate.d/ha_bkup deploy/logrotate/ha_bkup
 
-# --- snapshot lumpy rsnapshot files (non-fatal if lumpy is unreachable) ------
-LUMPY_HOST=lumpy
-LUMPY_FILES="usr/local/sbin/ha-rsnapshot-state usr/local/sbin/ha-rsnapshot-run etc/rsnapshot-lumpy.conf etc/systemd/system/ha-rsnapshot-state.service etc/systemd/system/ha-rsnapshot-state.timer"
+# --- snapshot remote hosts (each non-fatal) ---------------------------------
+pull_host lumpy deploy/lumpy rsnapshot \
+  usr/local/sbin/ha-rsnapshot-state \
+  usr/local/sbin/ha-rsnapshot-run \
+  usr/local/sbin/plex-db-dump \
+  etc/rsnapshot-lumpy.conf \
+  etc/rsnapshot-lumpy.excludes \
+  etc/systemd/system/ha-rsnapshot-state.service \
+  etc/systemd/system/ha-rsnapshot-state.timer
 
-install -d -m 755 deploy/lumpy
-tmpd=$(mktemp -d) || tmpd=""
-if [ -n "$tmpd" ]; then
-  if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
-       "$LUMPY_HOST" "tar -cf - -C / $LUMPY_FILES" 2>>"$LOG" \
-     | tar -xf - -C "$tmpd" 2>>"$LOG"; then
-    n=0
-    for p in $LUMPY_FILES; do
-      if [ -f "$tmpd/$p" ]; then
-        install -m 644 "$tmpd/$p" "deploy/lumpy/$(basename "$p")"
-        n=$((n + 1))
-      fi
-    done
-    log "lumpy: snapshotted $n of 5 rsnapshot files"
-    [ "$n" -eq 5 ] || log "WARN: lumpy returned only $n of 5 expected files"
-  else
-    log "WARN: could not pull rsnapshot files from lumpy; keeping previous copies"
-  fi
-  rm -rf "$tmpd"
-else
-  log "WARN: mktemp failed; skipped lumpy snapshot"
-fi
-# --- snapshot uther VPN monitor files (non-fatal if uther is unreachable) ----
-UTHER_HOST=uther
-UTHER_FILES="usr/local/sbin/ha-vpn-state etc/systemd/system/ha-vpn-state.service etc/systemd/system/ha-vpn-state.timer"
+pull_host uther deploy/uther vpn \
+  usr/local/sbin/ha-vpn-state \
+  etc/systemd/system/ha-vpn-state.service \
+  etc/systemd/system/ha-vpn-state.timer
 
-install -d -m 755 deploy/uther
-tmpd=$(mktemp -d) || tmpd=""
-if [ -n "$tmpd" ]; then
-  if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=yes \
-       "$UTHER_HOST" "tar -cf - -C / $UTHER_FILES" 2>>"$LOG" \
-     | tar -xf - -C "$tmpd" 2>>"$LOG"; then
-    n=0
-    for p in $UTHER_FILES; do
-      if [ -f "$tmpd/$p" ]; then
-        install -m 644 "$tmpd/$p" "deploy/uther/$(basename "$p")"
-        n=$((n + 1))
-      fi
-    done
-    log "uther: snapshotted $n of 3 vpn files"
-    [ "$n" -eq 3 ] || log "WARN: uther returned only $n of 3 expected files"
-  else
-    log "WARN: could not pull vpn files from uther; keeping previous copies"
-  fi
-  rm -rf "$tmpd"
-else
-  log "WARN: mktemp failed; skipped uther snapshot"
-fi
+# Larry's collector carries the GPU block, so it is no longer identical to
+# whitey's copy in deploy/sbin/. Keep it separately.
+pull_host larry deploy/larry collector \
+  usr/local/sbin/ha-metrics
 
-# --- snapshot lovelace dashboards out of .storage ----------------------------
-for f in "$CFG"/.storage/lovelace* ; do
+# --- snapshot lovelace dashboards out of .storage ---------------------------
+install -d -m 755 deploy/dashboards
+for f in "$CFG"/.storage/lovelace*; do
   [ -f "$f" ] || continue
   out="deploy/dashboards/$(basename "$f").json"
-  if python3 -c "
-import json,sys
-d=json.load(open('$f'))
-json.dump(d.get('data',{}).get('config',d), open('$out','w'), indent=2, sort_keys=True)
-" 2>/dev/null; then
-    :
-  else
-    log \"WARN: could not parse $f\"
+  if ! python3 - "$f" "$out" <<'PY' 2>>"$LOG"
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+d = json.load(open(src))
+with open(dst, "w") as fh:
+    json.dump(d.get("data", {}).get("config", d), fh, indent=2, sort_keys=True)
+PY
+  then
+    log "WARN: could not parse $f"
   fi
 done
 
-
-# --- commit ------------------------------------------------------------------
+# --- commit (only if something changed) -------------------------------------
 git add -A
 if git diff --cached --quiet; then
   log "no changes"
+else
+  count=$(git diff --cached --name-only | wc -l)
+  files=$(git diff --cached --name-only)
+  if git "${GIT_ID[@]}" commit -q -m "Auto-commit $(date +%F): $count file(s)" -m "$files"; then
+    log "committed $count file(s)"
+  else
+    log "ERROR: commit failed"
+    write_state commit_failed "git commit failed on whitey"
+    exit 1
+  fi
+fi
+
+# --- reconcile with GitHub (non-fatal) --------------------------------------
+if ! git fetch -q "$REMOTE" "$BRANCH" 2>>"$LOG"; then
+  log "WARN: fetch failed; commits stay local until the next run"
+  write_state fetch_failed "could not reach GitHub"
   exit 0
 fi
 
-SUMMARY=$(git diff --cached --name-only | head -5 | tr '\n' ' ')
-git -c user.name="Jamie Gordon" -c user.email="jamie@jamiegordon.net" \
-    commit -q -m "Auto-commit $(date +%F): ${SUMMARY}" || { log "commit failed"; exit 1; }
-log "committed: ${SUMMARY}"
+if [ "$(git rev-list --count "HEAD..$REMOTE/$BRANCH")" -gt 0 ]; then
+  if git "${GIT_ID[@]}" rebase -q --autostash "$REMOTE/$BRANCH" >>"$LOG" 2>&1; then
+    log "rebased onto $REMOTE/$BRANCH"
+  else
+    git rebase --abort >>"$LOG" 2>&1
+    log "ERROR: rebase onto $REMOTE/$BRANCH conflicted and was aborted; local commits kept"
+    write_state rebase_conflict "rebase onto GitHub conflicted; resolve by hand"
+    exit 0
+  fi
+fi
 
-# --- push (non-fatal: must not alarm when the internet is down) -------------
-if git push -q origin main 2>>"$LOG"; then
+if [ "$(git rev-list --count "$REMOTE/$BRANCH..HEAD")" -eq 0 ]; then
+  log "up to date with $REMOTE/$BRANCH"
+  write_state up_to_date "nothing to push"
+  exit 0
+fi
+
+if git push -q "$REMOTE" "HEAD:$BRANCH" 2>>"$LOG"; then
+  date +%s > "$LASTPUSH_FILE"
+  git fetch -q "$REMOTE" "$BRANCH" 2>>"$LOG"
   log "pushed"
+  write_state pushed "pushed to GitHub"
 else
   log "WARN: push failed, commit is local only"
+  write_state push_failed "push rejected or GitHub unreachable"
 fi
 exit 0
