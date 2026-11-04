@@ -1,6 +1,6 @@
 # Home Assistant Runbook — Swamp Castle
 
-Last updated: 2026-08-30 Maintainer: Jamie Gordon Primary node: **whitey** (192.168.86.101)
+Last updated: 2026-11-04 Maintainer: Jamie Gordon Primary node: **whitey** (192.168.86.101)
 
 ---
 
@@ -240,7 +240,10 @@ Lumpy's rsnapshot job is the largest backup in the house — roughly 9.1 TB of m
 | :---- | :---- |
 | Config | `/etc/rsnapshot-lumpy.conf` — **not** the default `/etc/rsnapshot.conf`, which does not exist on lumpy |
 | Snapshot root | `/mnt/backup/.snapshots/.sync/lumpy_media/` |
-| Backup point | `backup /data/ lumpy_data/` |
+| Backup points | `backup /data/ lumpy_data/`, `backup /opt/beets/ lumpy_opt_beets/`, `backup /srv/docker/ lumpy_srv_docker/` |
+| Excludes / pre-exec | `exclude_file /etc/rsnapshot-lumpy.excludes`; `cmd_preexec /usr/local/sbin/plex-db-dump` (consistent Plex DB copy before the run) |
+| rsync args | `rsync_short_args -a`; `rsync_long_args --delete --numeric-ids --delete-excluded --bwlimit=20480` — `--relative` removed in October; bandwidth capped at 20 MiB/s so a run cannot saturate the NFS link |
+| Priority | `ha-rsnapshot-run` invokes rsnapshot under `ionice -c2 -n7 nice -n 19`, so backups yield to Plex and Frigate |
 | Underlying storage | `whitey:/srv/MediaBkup` over **NFS 4.2, autofs-mounted, `hard`** (see topology below) |
 | Retention | `retain daily 7`, `retain weekly 4` |
 | Log | `/var/log/rsnapshot-lumpy.log` |
@@ -600,12 +603,14 @@ Added 2026-08-30. Frigate itself is unchanged and stays on lumpy; only the Home 
 
 | Item | Value |
 | :---- | :---- |
-| Frigate host | lumpy, 192.168.86.100, Frigate 0.17 |
-| Integration | `frigate-hass-integration` v5.11.0, installed through HACS |
+| Frigate host | lumpy, 192.168.86.100, Frigate 0.18 (0.17 at install) |
+| Integration | `frigate-hass-integration` v5.15.6 as of 2026-11-04 (v5.11.0 at install), through HACS |
 | API URL configured in HA | `http://192.168.86.100:8971` |
 | API auth | Frigate UI username and password |
 | Event transport | MQTT to whitey `1883` as broker user `frigate` |
-| Cameras surfaced | four |
+| Cameras surfaced | four — `camera.driveway`, `camera.back_40`, `camera.front_door`, `camera.fertile_crescent` |
+| Cards | Advanced Camera Card and Frigate Modern card, both HACS frontend resources under `www/community/` |
+| Dashboard | **Grassburg Cameras** — Overview plus one view per camera (§6) |
 
 ### Order of operations
 
@@ -628,6 +633,12 @@ The password in Frigate's config uses Frigate's own `{FRIGATE_MQTT_PASSWORD}` su
 | `8971` | Authenticated UI and API | The correct choice for a separate host on the LAN |
 
 Port 8971 defaults to **TLS with a self-signed certificate**, which Home Assistant refuses to verify — so either TLS is disabled on Frigate and HA uses `http://`, or Frigate is issued a real JGDN certificate. Unchecking "Validate SSL" is the third option and the worst one.
+
+### Notifications (working)
+
+`automations.yaml` holds **Frigate - iPhone security alerts**, triggered by MQTT topic `frigate/reviews` and delivered to `notify.mobile_app_iphone` with the review snapshot. Verified end to end in early November 2026. Scope is deliberately selective: alerts, not every detection. Which labels and zones qualify is controlled on the Frigate side (review `alerts` labels and required zones per camera), so tuning a camera rarely needs an HA edit.
+
+Camera-side tuning recorded so far: Driveway gates review items on the `Car_Park` zone and masks a frequently misclassified tree for `person` only; Back_40 needs object filters, zones, review labels and notifications kept consistent with each other.
 
 ### Still to wire up
 
@@ -736,6 +747,217 @@ To exercise the alert without waiting for a real failure, run with a deliberatel
 
 ---
 
+## 4f. Music Assistant (whitey)
+
+Added 2026-09-09; Sonos grouping findings added 2026-10-17. Container mode has no add-on store, so the server that HAOS installs get as the Music Assistant add-on runs here as its own Portainer stack, the same pattern as Mosquitto in §4c.
+
+| Item | Value |
+| :---- | :---- |
+| Image | `ghcr.io/music-assistant/server:2.10.0` — pinned, not `latest` |
+| Container | `music-assistant`, Portainer stack, `restart: unless-stopped` |
+| Network mode | `host` — mandatory, see below |
+| Runs as | UID 1000 (`jgordon` on both whitey and lumpy). Last observed live: `uid=1000 gid=1001` — see the GID note below |
+| Data / cache | `/srv/whitey-r6/VarData/Docker-data/MusicAssistant/{data,cache}` → `/data`, `/cache` |
+| Music source | `/mnt/lumpy/music` (NFS, read-only) → `/media/music:ro` |
+| Web UI | `8095/tcp`; proxied as `https://ma.jamiegordon.net` |
+| Stream server | `192.168.86.101:8097/tcp`, plain HTTP, **not proxied** |
+| Pi-hole record | `ma.jamiegordon.net` → `192.168.86.101` |
+| Compose (intended) | `deploy/music-assistant/compose.yaml` |
+
+### Why host networking, and why no port restriction
+
+Sonos, AirPlay, Chromecast, and DLNA discovery all depend on mDNS/UPnP multicast, and AirPlay opens random TCP and UDP ports. A bridge network breaks discovery outright, and firewalling MA down to fixed ports is explicitly unsupported. MA, Home Assistant, and every player must sit on the same flat layer-2 segment — true here for the house LAN; the barn side of the NanoStation bridge is the one place to suspect if a player there misbehaves.
+
+Before adding any other host-network service to whitey, check `ss -tulpn | grep -E '8095|8097'`. If 8097 is ever taken, MA silently moves the stream server to the next free port.
+
+### Stable vs beta
+
+Never switch an instance between stable and beta by changing the image tag, and never copy the database between channels. A beta, if wanted, is a second stack with its own data directory, not run at the same time.
+
+### Music source: NFS from lumpy
+
+MA does **not** mount the share itself. In-container SMB/NFS mounting needs `SYS_ADMIN`, `DAC_READ_SEARCH`, and `apparmor:unconfined`, which is a large isolation loss for a read-only library. The share is mounted on the host and bind-mounted read-only, which also protects the curated album-folder layout (the reason Lidarr was removed) — MA cannot write to it, and playlists fall back to MA's built-in provider.
+
+**Lumpy side** — `/etc/exports` has a single `/data` line; whitey was added to it as a read-only client:
+
+```
+# exportfs -v (effective, 2026-09-09)
+/data  192.168.86.103(sync,wdelay,hide,no_subtree_check,sec=sys,rw,secure,root_squash,no_all_squash)
+/data  192.168.86.102(sync,wdelay,hide,no_subtree_check,sec=sys,rw,secure,root_squash,no_all_squash)
+/data  192.168.86.101(sync,wdelay,hide,no_subtree_check,sec=sys,ro,secure,root_squash,no_all_squash)
+```
+
+Add clients to the existing line rather than a second `/data` line. Apply with `sudo exportfs -ra` and confirm with `sudo exportfs -v`. `root_squash` stays on — `no_root_squash` would give a container on whitey root-equivalent access to lumpy's media array.
+
+**Whitey side** — `/etc/fstab` (copy in `deploy/music-assistant/fstab-lumpy-music.fragment`):
+
+```
+# Lumpy music library (read-only source for Music Assistant)
+192.168.86.100:/data/Media/Music  /mnt/lumpy/music  nfs  ro,nofail,_netdev,soft,timeo=100,retrans=3,x-systemd.mount-timeout=30  0  0
+```
+
+The mount point must exist first (`mkdir -p /mnt/lumpy/music`), and `systemctl daemon-reload` is needed after editing fstab.
+
+**No `x-systemd.automount`.** A Docker bind mount is resolved when the container starts. If an autofs path has not been triggered by then, the container binds the empty trigger directory and MA sees an empty library — no error, and it stays empty until the container is recreated. Instead, Docker is made to wait for the mount with a drop-in, `/etc/systemd/system/docker.service.d/10-nfs-mounts.conf` (copy in `deploy/systemd/docker.service.d/`):
+
+```
+[Unit]
+RequiresMountsFor=/mnt/lumpy/music
+```
+
+With `nofail` on the fstab line, whitey still boots if lumpy is down; MA just starts with an empty source.
+
+`soft,timeo=100` means a stalled lumpy read returns an error rather than hanging whitey, but it also means an NFS stall can starve an active stream. Keep that in mind when diagnosing dropouts that hit every player at once.
+
+### Permissions: why UID 1000, and the GID 1001 collision
+
+`namei -l /data/Media/Music` on lumpy:
+
+```
+drwxr-xr-x root    root  /
+drwxrwxr-x root    1023  data
+drwxrws--- jgordon media Media
+drwxrws--- jgordon media Music
+```
+
+`Media` and `Music` are `2770 jgordon:media` — no bits for other, so the squashed `nobody` identity (and a root-run container) gets `Permission denied` on `readdir` even though the mount succeeds. Rather than loosening the tree, MA runs as **UID 1000**, which is `jgordon` on both hosts. With `sec=sys` over NFSv3 the client sends only numeric IDs, and owner bits are checked before group, so UID 1000 has full read access. This is the same approach Jellyfin uses on lumpy.
+
+| ID | lumpy | whitey |
+| :---- | :---- | :---- |
+| UID 1000 | `jgordon` | `jgordon` |
+| GID 1001 | `media` | **`hamon`** (the restricted monitoring account's group) |
+
+The container was last observed running as `gid=1001`. That works, and nothing `hamon`-owned is mounted into the container, so there is no live exposure — but the number means two different things on the two hosts. Do not renumber `hamon` to tidy this up; its key ownership and forced-command setup is a working critical path. The cleaner target is `user: "1000:1000"`, adding `group_add: ["1001"]` only if lumpy holds music files not owned by UID 1000:
+
+```bash
+# on lumpy — any output means group access is needed
+find /data/Media/Music ! -uid 1000 -printf '%u:%g %p\n' | head
+```
+
+MA ignores `PUID`/`PGID`; `user:` in compose is the only mechanism. Non-root operation needs **both** `/data` and `/cache` mounted and owned by the run UID, or startup fails with `sqlite3.OperationalError: unable to open database file`.
+
+### Players
+
+Discovered on first start, 2026-09-09:
+
+| Player | Provider | Notes |
+| :---- | :---- | :---- |
+| Living Room — Playbase + two Sonos One surrounds | Sonos (S2) | Home-theater set. **Do not use as group coordinator** — see below |
+| Piano Room — Sonos One stereo pair | Sonos (S2) | Use as coordinator for multi-room groups |
+| Shop — Play:1 | Sonos (S2) | Docs recommend Queue Flow Mode ON for the Play:1 |
+| Sonos Move | Sonos (S2) | Wi-Fi only, cannot join SonosNet; power-saves on battery |
+| Peanuts and Popcorn receiver — Denon AVR-X3800H | HEOS (also visible via AirPlay) | One player for all zones; starting a stream with no zone active powers the main zone and switches it to HEOS. Map a HA entity as its power control |
+| Betty | AirPlay | |
+| UHD8000 — Zidoo | DLNA | |
+| Apple TVs | AirPlay | Need PIN pairing from player settings; optional remote-control pairing lets MA wake them and set volume |
+
+Sonos speaker IDs (the MAC prefix is embedded, useful for grepping router logs):
+
+| Speaker | RINCON ID | MAC prefix |
+| :---- | :---- | :---- |
+| Sonos Move | `RINCON_48A6B8ED8CA401400` | `48:A6:B8:ED:8C` |
+| Shop | `RINCON_7828CAA7FE6801400` | `78:28:CA:A7:FE` |
+| Piano Room | `RINCON_7828CAC60C0E01400` | `78:28:CA:C6:0C` |
+| Living Room | `RINCON_B8E93746895601400` | `B8:E9:37:46:89` |
+
+A Wi-Fi MAC can differ from the RINCON MAC in the last octet, which is why only five octets are listed.
+
+The Home Assistant Sonos integration stays. The documented conflict is with MA's **S1** provider only; all speakers here are S2.
+
+### Sonos grouping: the coordinator rule
+
+In a native Sonos group, MA streams to **one** speaker — the group coordinator, which is whichever player the group was started on — and that speaker relays audio to every other member over Sonos's own protocol. That makes the dropout pattern diagnostic:
+
+| Symptom | Where to look |
+| :---- | :---- |
+| All members drop together | Upstream of the members: the MA server, the NFS read from lumpy, or the coordinator's own link |
+| Only a non-coordinator drops | The speaker-to-speaker path over the Wi-Fi mesh; MA is not involved past the coordinator |
+| Behaviour changes between runs | Roaming between ZenWiFi nodes |
+
+MA buffers only about two seconds; Spotify and Apple Music buffer tens of seconds. "It works fine in the Sonos app" does not rule out the network.
+
+**Finding, 2026-10-17:** start on Living Room and add Piano Room → both rooms drop out repeatedly. Start on Piano Room and add Living Room → both rooms stable. Same server, same NFS source, same codec, same two rooms, so MA, NFS, server CPU, and the Piano Room pair are ruled out. The fault is the Playbase acting as coordinator. When it coordinates it must simultaneously receive the stream over Wi-Fi, feed its two surrounds over the home-theater satellite link, and relay to the Piano Room pair. It is the oldest and busiest speaker in that path.
+
+**Operating rule until the Playbase is wired:** never let a home-theater room coordinate a multi-room group.
+
+- MA UI: start on Piano Room, then add Living Room.
+- HA automations: `media_player.join` with Piano Room as `entity_id` and Living Room in `group_members`. The `entity_id` player becomes coordinator.
+- Saved MA Sync Group: the docs do not say how the leader is chosen. List Piano Room first and confirm the Sonos app labels the group "Piano Room + 1"; if not, fall back to the manual order.
+
+**Permanent fix:** wire the Playbase to Ethernet. That gives the coordinator a reliable inbound link and lets the other speakers (except the Move) use SonosNet for speaker-to-speaker traffic instead of the ZenWiFi mesh. Fallbacks if cabling is impractical: AiMesh client binding for the Playbase to its nearest node, Smart Connect and Roaming Assistant off for it, and MP3 output codec on the Living Room player.
+
+**Confirming tests (pending):**
+
+1. Living Room as coordinator with **Output codec = MP3** on the Living Room player (and on the group, if one is used). If dropouts stop, the Playbase's Wi-Fi link is bandwidth-limited.
+2. Ping the Playbase and the Piano Room primary from whitey during a Living Room–led dropout, and check router logs for the Playbase's MAC:
+
+```bash
+PLAYBASE_IP="192.168.86.X"
+PIANO_IP="192.168.86.Y"
+RUN_DIR="/srv/whitey-r6/VarData/diag/sonos-coordinator-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "${RUN_DIR}"
+ping -D -O -i 0.5 "${PLAYBASE_IP}" > "${RUN_DIR}/playbase.log" 2>&1 &
+ping -D -O -i 0.5 "${PIANO_IP}"    > "${RUN_DIR}/piano.log" 2>&1 &
+echo "Reproduce the dropout, then run: kill %1 %2"
+
+# afterwards
+grep -c 'no answer' "${RUN_DIR}"/*.log
+awk -F'time=' 'NF>1{split($2,a," "); if (a[1]+0 > 100) print FILENAME": "$0}' "${RUN_DIR}"/*.log | head -40
+grep -rEi 'assoc|disassoc|deauth|roam' /var/log/remote/ | grep -i 'B8:E9:37:46:89' | tail -30
+```
+
+Healthy Wi-Fi stays under about 30 ms with no missing replies. For a wider capture across several speakers plus MA logs, NFS stats, and container CPU, use `deploy/sbin/sonos-dropout-capture`. Find speaker IPs with `avahi-browse -rpt _sonos._tcp` (package `avahi-utils`).
+
+General mesh guidance from the MA networking docs, in order of value: wire what can be wired; stop speakers roaming (band steering and fast roaming off, bind to nearest node); transmit power to medium; fixed channels with automatic optimization off; 20 MHz on 2.4 GHz and 40 MHz on 5 GHz; multicast enhancement and multicast filtering off.
+
+### AirPlay PTP is degraded — deliberate
+
+The log shows `PTP clock daemon could not start ... PTP timing is degraded` at every start. PTP needs UDP 319/320, which are privileged ports; a UID 1000 process cannot bind them, and `cap_add: NET_BIND_SERVICE` does not help because Docker grants no ambient capabilities to non-root users.
+
+Impact is limited to multi-room sync between native AirPlay 2 players (the Apple TVs). Sonos-to-Sonos grouping and HEOS are unaffected. However, **if any AirPlay device is added to a Sonos group, MA switches the whole group to AirPlay**, and this degradation then applies — keep AirPlay devices out of Sonos groups. Check each Sonos player's Output Protocol(s) section shows Sonos (native).
+
+Do **not** fix this by lowering `net.ipv4.ip_unprivileged_port_start` on whitey; that would open ports 319–1023 to any unprivileged process on the host that also serves DNS on 53 and syslog on 514. The only clean route is running MA as root, which then requires `o+x` on `/data/Media` and `o+rX` on the Music subtree on lumpy.
+
+### Smart Fades and the `/.cache` error
+
+On first start the Smart Fades provider failed with `PermissionError: [Errno 13] Permission denied: '/.cache'`. `torch.hub` resolves its model directory from `HOME`, which is unset for a non-root container, so it lands at the filesystem root; the `/cache` mount is never consulted. Fix: add `HOME=/data` and `XDG_CACHE_HOME=/cache` to the stack environment. Smart Fades then downloads its beat-detection checkpoint once into `/cache` and runs offline. It needs about 4 GB of RAM. Alternatively, disable the Smart Fades provider.
+
+### Reverse proxy
+
+NPM proxy host `ma.jamiegordon.net` → `http` / `192.168.86.101` / `8095`, JGDN certificate, Force SSL, HTTP/2.
+
+| Option | Setting | Why |
+| :---- | :---- | :---- |
+| Websockets Support | **On** | The frontend holds a persistent websocket; without it the UI loads and then shows no players |
+| Cache Assets | **Off** | Avoids a stale frontend served against a new backend after an upgrade |
+| Block Common Exploits | On | |
+
+The Forward Hostname field takes a bare host or IP. Putting `http://` there (the scheme has its own field) renders `proxy_pass http://http://…` and produces a gateway error.
+
+Only the UI is proxied. The stream server stays on plain `http://192.168.86.101:8097` — Sonos, HEOS, and Apple TV firmware pull audio from it directly and do not trust the internal CA. Pointing the stream base URL at the proxied name breaks playback while the UI still looks healthy.
+
+### Home Assistant integration
+
+Add **Music Assistant** under Settings → Devices & Services with `http://192.168.86.101:8095` directly, not through NPM, and log in with an MA **admin** account. A regular account produces permission errors later on actions such as `music_assistant.play_media`. Target the `media_player` entities the MA integration creates, not the HA Sonos ones, in automations.
+
+### Verification
+
+```bash
+findmnt /mnt/lumpy/music
+ss -tulpn | grep -E '8095|8097'          # both owned by "mass"
+docker exec music-assistant id
+docker exec music-assistant ls /media/music | head
+docker logs music-assistant 2>&1 | grep -A1 'Started streamserver'   # must show 192.168.86.101:8097
+curl -sI http://192.168.86.101:8095/ | head -1
+curl -skI https://ma.jamiegordon.net/ --resolve ma.jamiegordon.net:443:192.168.86.101 | head -1
+```
+
+### Backup
+
+`/srv/whitey-r6/VarData/Docker-data/MusicAssistant/data` holds the library database, provider configuration, and credentials. It is on RAID6 but not yet in any explicit backup set — see §10. `cache` is re-creatable and should be excluded.
+
+---
+
 ## 5\. HA entities
 
 Defined in `config/packages/homelab_nodes.yaml`.
@@ -751,6 +973,7 @@ Defined in `config/packages/homelab_nodes.yaml`.
 | `sensor.oldest_backup_age` | Hours; `detail` attribute holds the per-source list |
 | `sensor.homelab_pending_updates` | Sum of pending apt packages across hosts |
 | `sensor.homelab_containers_running` | whitey \+ lumpy running container count |
+| `binary_sensor.ha_config_git_problem` | `problem` class, from `packages/ha_config_git.yaml`. On when `extra.ha_git` on whitey is missing, older than 26 h, or reports anything but `pushed`/`up_to_date` (§6a) |
 
 `scan_interval: 60`, `command_timeout: 20`, SSH `ConnectTimeout=8`. The SSH timeout fires first and cleanly, so HA never holds a sensor hung on a dead host.
 
@@ -760,16 +983,27 @@ Defined in `config/packages/homelab_nodes.yaml`.
 
 The SSH wrapper uses `StrictHostKeyChecking=yes`, not `accept-new` — known\_hosts is already seeded, so an unexpected host key should be a hard failure.
 
-`json_attributes` on all four metrics sensors includes `extra`, the passthrough for root-written state described in §4a. Lumpy's `extra.rsnapshot` is populated; the other three carry `{}` until uther's `vpn.json` lands.
+`json_attributes` on all four metrics sensors includes `extra`, the passthrough for root-written state described in §4a. Populated today: lumpy `extra.rsnapshot`; uther `extra.vpn` and `extra.bkup_freshness`; whitey `extra.ha_git` (once the 2026-11 `ha-config-commit` is installed).
+
+**Larry GPU.** Larry's `ha-metrics` adds `gpu_util_pct` from `nvidia-smi`; a failed sample is JSON `null`, never a fabricated 0. It is listed in the shared `&node_attrs` anchor and shown on larry's Nodes card. Larry's collector is therefore **no longer identical** to whitey's — `deploy/sbin/ha-metrics` is whitey's copy and has no GPU block; larry's copy is mirrored separately to `deploy/larry/ha-metrics`.
 
 ---
 
 ## 6\. Dashboard
 
-Dashboard **Homelab**, two views, defined via the raw configuration editor.
+Storage-mode dashboards (exported nightly to `deploy/dashboards/`):
 
-- **Overview** — Attention card, node/backup gauges, container and update tiles, per-node connectivity tiles, backup sentinel table, **Lumpy rsnapshot card**, uther service table.  
-- **Nodes** — per-host card with OS, kernel, uptime, load, memory, filesystems, RAID arrays, containers with image tags, and systemd units.
+| Dashboard | URL path | Content |
+| :---- | :---- | :---- |
+| Homelab | `dashboard-homelab` (admin only) | Infrastructure — detailed below |
+| Grassburg Cameras | `grassburg-cameras` | Overview plus Driveway, Back 40, Front Door, Fertile Crescent |
+| Sonarr | `dashboard-sonarr` | Sonarr status |
+| Map | `map` | Built-in |
+
+Dashboard **Homelab**, two views (`overview`, `nodes`), defined via the raw configuration editor.
+
+- **Overview** — Attention card, node/backup gauges, container and update tiles, per-node connectivity tiles, backup sentinel table, **Lumpy rsnapshot card**, uther service table, Uther VPN card, router/internet card for gilbert.  
+- **Nodes** — per-host card (larry's includes GPU utilization) with OS, kernel, uptime, load, memory, filesystems, RAID arrays, containers with image tags, and systemd units.
 
 The **Attention card is the point of the whole dashboard**. It walks every node, filesystem, container, and unit and surfaces only what is wrong; when everything is healthy it says so in one line. This inverts the usual homelab failure mode of forty gauges nobody reads after the first week.
 
@@ -881,13 +1115,25 @@ Lumpy's key is `SHA256:Lkx4ehN8PuHKr/DkjIl24dFQG3YJnimRmNdlhzPKY1s`.
 
 Audited after the first commit — `rsnapshot-lumpy.conf` carries no credentials; `cmd_ssh /usr/bin/ssh` is a binary path and is unused, since these backups are local-to-NFS rather than over SSH.
 
-> **Known defect:** the auto-commit subject line truncates the file list. A commit touching nine files may name only five, so the git log understates what changed. Read `git show --stat` rather than trusting the subject.
-
 ### Auto-commit
 
 `ha-config-commit.timer`, daily 04:45, `RandomizedDelaySec=300`, `Persistent=true`. Placed after the 04:15 backup mirror so the day's commit includes anything that run changed.
 
-**`git push` failure is non-fatal by design** — it logs a warning and exits 0\. An internet outage must not become a failed unit and an alert; the commit still landed locally and the next successful run pushes both. Log: `/var/log/ha_bkup/ha-config-commit.log`.
+Order of a run (rewritten 2026-11-04 after two months of silently rejected pushes, §9):
+
+1. Refuse to run if a manual rebase is in progress.
+2. Snapshot whitey files into `deploy/sbin`, `deploy/systemd`, `deploy/logrotate`.
+3. Pull remote files over one `ssh -n` + `tar` connection per host, judged by files received rather than tar's exit status: **lumpy** (7 — `ha-rsnapshot-state`, `ha-rsnapshot-run`, `plex-db-dump`, `rsnapshot-lumpy.conf`, `rsnapshot-lumpy.excludes`, state service and timer), **uther** (3 — `ha-vpn-state` and units), **larry** (1 — its GPU-aware `ha-metrics`). Each is non-fatal and logs `<host>: snapshotted n of m`.
+4. Export dashboards from `.storage`.
+5. Commit if anything changed. Subject `Auto-commit YYYY-MM-DD: N file(s)`; the full file list is in the body.
+6. **Always** `git fetch`, rebase local commits onto `origin/main` (`--autostash`) if GitHub is ahead, then push if anything is unpushed. A conflicting rebase is aborted, leaving local commits intact.
+7. Write `/var/lib/ha-metrics/ha_git.json` (`status`, `ahead`, `behind`, `head`, `epoch`, `last_push_epoch`), which `ha-metrics` inlines as `extra.ha_git` on `sensor.whitey_metrics`.
+
+Statuses: `pushed`, `up_to_date` (healthy); `fetch_failed`, `push_failed`, `rebase_conflict`, `rebase_in_progress`, `commit_failed` (problems).
+
+**Network failure is still non-fatal** — exit 0, commit stays local, the next run delivers it. What changed is that the failure is no longer invisible: `binary_sensor.ha_config_git_problem` (§5) raises a persistent notification and an iPhone push after 30 minutes, and clears itself on recovery. Log: `/var/log/ha_bkup/ha-config-commit.log`.
+
+**Commits made off-whitey (GitHub web UI, another clone) are now safe** — the next run rebases onto them. Avoid editing files that whitey snapshots (`deploy/sbin`, `deploy/systemd`, `deploy/lumpy`, `deploy/uther`, `deploy/larry`, `deploy/dashboards`, live config) anywhere but on their source host, or the rebase will conflict.
 
 Credential audit before first commit — confirm no secrets in the snapshotted scripts:
 
@@ -903,15 +1149,17 @@ As of 2026-08-20 this returns only `MAIL_TO`, `MAIL_FROM`, and `RELAY_HOST=jgord
 
 | Cadence | Task |
 | :---- | :---- |
-| Daily (automatic) | HA backup 03:30; mirror \+ verify 04:15; config auto-commit 04:45 |
+| Daily (automatic) | HA backup 03:30; mirror \+ verify 04:15; config auto-commit, rebase and push 04:45 (alerts via `binary_sensor.ha_config_git_problem`) |
 | Hourly (automatic) | `ha-rsnapshot-state` on lumpy refreshes rsnapshot state |
 | Weekly | Review Attention card; clear reboot-required flags; apt updates on all four nodes |
 | Monthly | Pull HA image for the current minor tag; check for a new HA minor release and read its breaking changes; `docker image prune` |
 | Monthly | Confirm `.last_backup` sentinels still readable by `hamon` (catches ACL inheritance failures) |
 | Monthly | Confirm `no_create_root` is still `1` in `/etc/rsnapshot-lumpy.conf` and `configtest` passes. A package upgrade or a hand edit reverting this is a filesystem-filling event, not an inconvenience. |
 | Monthly | Confirm the lumpy pull is still working — \`grep 'lumpy:' /var/log/ha\_bkup/ha-config-commit.log |
-| Monthly | Confirm `ha-config-commit` is still pushing — \`grep WARN /var/log/ha\_bkup/ha-config-commit.log |
+| Monthly | Confirm the larry and uther pulls are complete — `grep -E 'snapshotted|WARN' /var/log/ha_bkup/ha-config-commit.log \| tail` |
 | Monthly | Confirm MQTT is healthy — `frigate/available` reads `online` and the broker log shows both `hass` and `frigate` connected. A silent broker means no Frigate event entities, even though the camera pictures keep working from the API. |
+| Monthly | Check for a new Music Assistant stable release and read its notes. Upgrade by editing the pinned image tag in the stack and re-deploying; stay on the stable channel (§4f). Afterward confirm `Started streamserver on 192.168.86.101:8097` in the log and that the library still lists tracks |
+| Monthly | Confirm `/mnt/lumpy/music` is mounted on whitey and MA's library is non-empty. An empty library with no error means the container started before the NFS mount (§4f) |
 | Annually | Rotate the two Mosquitto broker passwords (`mosquitto_passwd -b` \+ `SIGHUP`, then update Frigate's `.env` and HA's MQTT entry) and the Frigate UI login; update 1Password |
 | Quarterly | Test-restore a backup into a throwaway container |
 | Quarterly | Verify JGDN certificate expiry in NPM |
@@ -941,6 +1189,8 @@ As of 2026-08-20 this returns only `MAIL_TO`, `MAIL_FROM`, and `RELAY_HOST=jgord
 | gussy, krizzy | Presence only | DHCP addresses; ping/router-based presence. |
 | Frigate (lumpy) | **Local, working** | Cameras, event entities, and Media Browser via the HACS integration over port 8971 plus MQTT. Nothing cloud-side. See §4d. |
 | Mosquitto (whitey) | Local | Own container, not an add-on — Container mode has no add-on store. Also the transport any future ESPHome, ratgdo, or BLE-proxy device will use. See §4c. |
+| Music Assistant (whitey) | Local | Own container, not an add-on. Plays local music from lumpy over NFS to Sonos, HEOS (Denon), AirPlay, and DLNA players with no cloud dependency. See §4f. |
+| Sonos | Local | HA Sonos integration kept alongside MA's Sonos (S2) provider. **Home-theater rooms must not coordinate multi-room groups** until the Playbase is wired (§4f). |
 | Yale lock | Needs Z-Wave | Only device requiring Z-Wave. Container mode has no built-in support. |
 | Tilt, Meater | Needs Bluetooth | Both BLE; require a radio or Bluetooth proxy near the equipment. |
 | Zigbee (Hue etc.) | Recommended path | Ethernet coordinator — SMLIGHT SLZB-06 or Sonoff ZBDongle-E — via ZHA. |
@@ -998,33 +1248,55 @@ As of 2026-08-20 this returns only `MAIL_TO`, `MAIL_FROM`, and `RELAY_HOST=jgord
 | `sed ... \| bash` produced no output at all and left an empty journal | **`ssh` inherited stdin and consumed the rest of the script.** The run ended after the first remote command, indistinguishable from never running. | `ssh -n` in any script that may be piped into a shell; or write to a temp file and execute that |
 | `diff ... \| vim -` opened an empty vim screen instead of an error | vim clears the screen and hides the upstream `No such file or directory` on stderr | Use `vimdiff a b`, or redirect to a file and inspect the exit status |
 | `journalctl -u <unit>` showed `-- No entries --` for a unit that had run | Caller not in `adm` or `systemd-journal` | Add the user to both; takes effect at next login. Until then use `sudo journalctl` |
+| `mount.nfs: mount point /mnt/lumpy/music does not exist` | fstab entry added before the directory | `mkdir -p /mnt/lumpy/music`, then `systemctl daemon-reload` and `mount -a` |
+| `mount.nfs: access denied by server` mounting lumpy's music on whitey | lumpy exported `/data` only to `.102` and `.103`; whitey was never a client. The subdirectory path was fine | Add `192.168.86.101(ro,sync,no_subtree_check)` to the **existing** `/data` line in lumpy's `/etc/exports`; `sudo exportfs -ra`. See §4f |
+| NFS mounted on whitey, but `ls` gave `Permission denied` | `root_squash` maps root to `nobody`, and `/data/Media` and `Music` are `2770 jgordon:media` with no bits for other | Run MA as UID 1000, which owns the tree on lumpy. Do not use `no_root_squash`. See §4f |
+| GID 1001 means different groups on the two hosts | `media` on lumpy, `hamon` on whitey. Found while preparing MA's data directory | Harmless for MA because UID 1000 has owner access; documented rather than renumbered. Target `user: "1000:1000"`. See §4f |
+| Smart Fades failed: `PermissionError: [Errno 13] Permission denied: '/.cache'` | `HOME` unset for a non-root container, so `torch.hub` tried to create its cache at the filesystem root | `HOME=/data` and `XDG_CACHE_HOME=/cache` in the stack environment |
+| `PTP clock daemon could not start ... PTP timing is degraded` | PTP needs UDP 319/320; a non-root process cannot bind them, and Docker gives non-root users no ambient capabilities | Accepted. Affects only AirPlay 2 multi-room sync. Do not lower `ip_unprivileged_port_start`. See §4f |
+| NPM returned a gateway error for `ma.jamiegordon.net` | Forward Hostname was `http://192.168.86.101`; the scheme has its own field, so nginx got `http://http://…` | Bare `192.168.86.101`; also turn Websockets Support on and Cache Assets off |
+| GitHub showed no auto-commits from 2026-09-01 to 2026-11-04; nightly log line `WARN: push failed, commit is local only` with `! [rejected] main -> main (fetch first)` | Commit `6b00bc5` was made off-whitey on 2026-09-02; `ha-config-commit` never fetched, so every later push was non-fast-forward. The only trace was a root-only log line | One-off: `git fetch`, `git pull --rebase origin main`, `git push origin HEAD:main` (pushed `e334162`). Permanent: rewritten `ha-config-commit` fetches and rebases every run and publishes `extra.ha_git`; `binary_sensor.ha_config_git_problem` alerts (§6a) |
+| Both Sonos rooms dropped out repeatedly when grouped | Living Room (Playbase + surrounds) was group coordinator. The coordinator alone receives MA's stream and relays it, and the Playbase could not sustain that alongside feeding its surrounds. Starting on Piano Room was stable | Start groups on Piano Room. Permanent fix: wire the Playbase. Confirming tests pending. See §4f |
 
 ---
 
 ## 10\. Open items
 
-1. **Verify the first auto-commit run** fired at 04:45 and pushed.  
+1. **~~Verify the first auto-commit run.~~** Done; superseded by items 18 and 30.  
 2. **Confirm the first wrapped run** (16:00, 2026-08-21) populates `last_run_rc`, `last_run_seconds`, and `last_run_age_hours` with real values, then decide how the card should treat **rc 2** — see the exit-code note in §4a.  
-3. **Verify `rsync_long_args` are actually applied.** The config specifies `--delete --numeric-ids --relative --delete-excluded`, but the log shows only `-a --delete`. Either the log is abbreviating or the directive is being ignored — `--relative` in particular changes the on-disk layout.  
-4. **Fix the auto-commit subject-line truncation** so the git log names every changed file.  
-5. **Notifications.** The Attention card logic should become automations that push on node-unreachable (10+ min), stale backup, degraded RAID, stopped container, and filesystem over 85%. Local push via the companion app works without internet.  
+3. **~~Verify `rsync_long_args` are actually applied.~~** Resolved in October: `--relative` removed and `--bwlimit=20480` added (§4a). Original note: The config specifies `--delete --numeric-ids --relative --delete-excluded`, but the log shows only `-a --delete`. Either the log is abbreviating or the directive is being ignored — `--relative` in particular changes the on-disk layout.  
+4. **~~Fix the auto-commit subject-line truncation.~~** Done 2026-11-04: subject carries a count, the body lists every file.  
+5. **Notifications — partly done.** Working: Frigate iPhone alerts (§4d), node-offline iPhone alert (`Homelab - Node offline iPhone alert`, verified by shutting down larry), backup persistent notifications (§4e), config-Git alert (§6a). Still to build: stale backup push, degraded RAID, stopped container, filesystem over 85%. Original note: The Attention card logic should become automations that push on node-unreachable (10+ min), stale backup, degraded RAID, stopped container, and filesystem over 85%. Local push via the companion app works without internet.  
 6. **~~VPN egress verification on uther.~~** **Done 2026-08-24** — see §4b. Implemented as a standalone read-only `ha-vpn-state` collector on its own timer, *not* by extending `pia-refresh-wireguard` as originally planned: that script is a remediator and observation must not be able to trigger remediation. Remaining follow-ups: require a bad state to persist across two samples before alerting (see the PIA-refresh overlap note in §4b), and decide what to do about the deliberate DNS asymmetry.  
 7. **Offsite backup strategy.** Broader household decision; see §3.  
 8. **~~Add an HA sentinel to uther's backup freshness checker~~** — **partly done 2026-09-02**, see §4e. The checker now publishes to HA and has a dead man's switch. Still outstanding: HA's *own* backups are not yet among the four watched sources, so they remain unwatched from outside whitey.  
-9. **AsusWRT integration** for gilbert — WAN state, client list, presence.  
+9. **~~AsusWRT integration for gilbert.~~** Done with AsusRouter 0.40.1 (manual install, pinned). Presence for gussy/krizzy still to add.  
 10. **Distinguish host-down from SSH-broken** with a ping check per node.  
 11. **ratgdo32 purchase and install** — needs the opener learn-button colour.  
 12. **Brewing and cooking telemetry** — Tilt and Meater need a BLE path.  
 13. **Internet connectivity block in `ha-metrics` on all four hosts.** Designed but not built. Three layers, each `timeout`\-wrapped: gateway `192.168.86.1`; transit by IP literal (`1.1.1.1`, `9.9.9.9`, plus a TCP 443 fallback because ICMP may be filtered); and name resolution tested *separately*, because whitey **is** the resolver and a naive combined check would blame the internet for an unbound failure. `ha-vpn-state` already implements this pattern for uther and can be lifted from it.  
-14. **Finish the Frigate surface.** Add `media_source:` for the Media Browser, install Advanced Camera Card for scrubbable live views, and import the Frigate notification blueprint. Item 5 above now has a working event source for camera alerts.  
+14. **Finish the Frigate surface — partly done.** Advanced Camera Card is installed and the Grassburg Cameras dashboard exists; iPhone alerts work via a hand-written automation rather than the blueprint. Still outstanding: `media_source:` for the Media Browser. Item 5 above now has a working event source for camera alerts.  
 15. **Decide on broker transport security.** 1883 is cleartext on the LAN by design — both clients are wired hosts on the same segment and TLS would add certificate lifecycle to a path that currently has none. Revisit if any wireless or off-segment client (a BLE proxy, an ESPHome node) starts publishing.  
 16. **Confirm the Mosquitto password file is recoverable, not backed up.** It is deliberately gitignored and lives outside `/config`, so no backup covers it. That is acceptable only while both broker passwords are in 1Password — verify they are, and that §4c's two-command rebuild is accurate.
 17. **Add `bkup-freshness` and its two units to the uther snapshot in `ha-config-commit`.** `UTHER_FILES` currently lists only the three `ha-vpn-state` files, so the checker is not auto-mirrored. Add it **only after** the patched script is installed on uther — the snapshot copies uther's version *over* the git copy, so doing it first would revert the patch. Bump the `$n -eq 3` expected-count check at the same time.  
-18. **`ha-config-commit` never pulls.** It commits and pushes but has no `git pull`, so a commit made on GitHub directly leaves whitey behind, and whitey's next push then fails with only a `WARN: push failed, commit is local only` line in `/var/log/ha_bkup/ha-config-commit.log`. Nothing on the dashboard shows this. Either add `git pull --ff-only` before the snapshot, or surface push failure as an alert.  
+18. **~~`ha-config-commit` never pulls.~~** Fixed 2026-11-04 (§6a, §9). Original note: It commits and pushes but has no `git pull`, so a commit made on GitHub directly leaves whitey behind, and whitey's next push then fails with only a `WARN: push failed, commit is local only` line in `/var/log/ha_bkup/ha-config-commit.log`. Nothing on the dashboard shows this. Either add `git pull --ff-only` before the snapshot, or surface push failure as an alert.  
 19. **Retire `/usr/local/sbin/bkup-freshness.v1` and `.bak-2026-08-06`.** Both are still executable and one tab-completion away from being run by hand. Delete them; git is the history.  
 20. **Normalize krizzy's sentinel timestamp** to `date -Is` output. It writes `-0700` rather than `-07:00`, which GNU `date` tolerates today but is not RFC 3339.  
 21. **Fix larry's directory mode on whitey.** `drwxr-x--x+` where its siblings are `drwxrws---` — missing setgid and group-write. Unexplained; make it match before it causes a permissions surprise.  
 22. **Consider converting larry's backup from cron to a systemd timer** with `Persistent=true`, for catch-up after downtime and for journal history. Cron gave us an invocation line and nothing else, which is exactly what made this outage hard to read.
+23. **Run the two Sonos coordinator tests** in §4f (MP3 codec on Living Room; ping plus router log during a Living Room–led dropout) and record the results here.  
+24. **Wire the Living Room Playbase to Ethernet.** Permanent fix for the coordinator dropouts; also brings up SonosNet for speaker-to-speaker traffic. Until then, Piano Room coordinates.  
+25. **Reconcile the live MA stack with `deploy/music-assistant/compose.yaml`.** The committed file is the intended configuration. Last observed live state was `gid=1001`; the target is `user: "1000:1000"` plus `HOME`/`XDG_CACHE_HOME`. Check with `docker inspect music-assistant --format '{{.Config.User}} {{.Config.Env}}'`, and run the `find ! -uid 1000` check on lumpy before dropping GID 1001. If the GID changes, `chown -R` the data and cache directories to match.  
+26. **Confirm whitey's fstab line has no `x-systemd.automount`** and that `/etc/systemd/system/docker.service.d/10-nfs-mounts.conf` is installed (`systemctl show docker -p RequiresMountsFor`).  
+27. **Add MA's data directory to a backup set.** `/srv/whitey-r6/VarData/Docker-data/MusicAssistant/data` is on RAID6 only; exclude `cache`. Add the compose file, fstab fragment, and docker drop-in to `ha-config-commit`'s snapshot list so they are mirrored automatically.  
+28. **Add the Music Assistant integration to HA** at `http://192.168.86.101:8095` with an MA admin account, if not already done; then pair the Apple TVs and map a power entity for the Denon's HEOS player.  
+29. **Consider MA announcements as a notification path.** Backup-failure and host-down alerts could also be spoken over a Sonos group, alongside item 5.  
+30. **~~Check whether whitey's auto-commit has been pushing.~~** It had not; reconciled 2026-11-04 (`e334162`). Original note: As of 2026-10-17 GitHub's last push was 2026-09-02 (`6b00bc5`), which is the failure mode item 18 predicts. Run `sudo grep WARN /var/log/ha_bkup/ha-config-commit.log | tail` and reconcile whitey's local history with `origin/main`.  
+31. **Verify the 2026-11-04 `ha-config-commit` and `packages/ha_config_git.yaml`.** After the first 04:45 run: `cat /var/lib/ha-metrics/ha_git.json` shows `pushed` or `up_to_date`, `state_attr('sensor.whitey_metrics','extra').ha_git` is populated in Settings → Tools → Template, and the binary sensor is off. Check root on whitey reaches larry: `sudo ssh -n -o BatchMode=yes larry true`.  
+32. **Stop tracking runtime and backup files.** `.shopping_list.json` (HA runtime data) and `packages/homelab_nodes.yaml.bak.20261018-165253` are committed. Add `.shopping_list.json` and `*.bak*` to `.gitignore`, then `git rm --cached` both on whitey — not on GitHub, or the next rebase deletes them from disk.  
+33. **Commit the Mosquitto assets.** `deploy/mosquitto/` (compose and `mosquitto.conf`) is referenced in §4c but does not exist in the repo.  
+34. **Decide whether larry's GPU block should go into every host's `ha-metrics`** (guarded by `command -v nvidia-smi`), restoring the one-identical-collector rule, or stay larry-only with `deploy/larry/` as its record.  
+35. **Add Music Assistant files to the snapshot only after item 25** reconciles the live stack with `deploy/music-assistant/compose.yaml`; snapshotting first would overwrite the intended file with the live one.  
 
 ---
 
@@ -1050,4 +1322,14 @@ As of 2026-08-20 this returns only `MAIL_TO`, `MAIL_FROM`, and `RELAY_HOST=jgord
 - [eclipse-mosquitto image](https://hub.docker.com/_/eclipse-mosquitto)  
 - [mosquitto issue \#3284](https://github.com/eclipse-mosquitto/mosquitto/issues/3284) — the misleading root-ownership warning in Docker  
 - [mosquitto issue \#2923](https://github.com/eclipse-mosquitto/mosquitto/issues/2923) — entrypoint chowns `/mosquitto` on every start
-
+- [Music Assistant installation](https://www.music-assistant.io/installation/) — host networking, `/data`, in-container mount privileges, stable vs beta  
+- [Music Assistant Sonos provider](https://www.music-assistant.io/player-support/sonos/) — S1 vs S2, AirPlay fallback, Play:1 flow mode  
+- [Music Assistant networking basics](https://www.music-assistant.io/faq/networking/) — dropout checklist, ping test, multi-AP guidance  
+- [Music Assistant troubleshooting](https://www.music-assistant.io/faq/troubleshooting/) — MP3/AAC codec for Wi-Fi dropouts  
+- [Music Assistant groups FAQ](https://www.music-assistant.io/faq/groups/)  
+- [Music Assistant HEOS provider](https://www.music-assistant.io/player-support/heos/) — multi-zone AVR behaviour  
+- [Music Assistant AirPlay provider](https://www.music-assistant.io/player-support/airplay/) — Apple TV pairing  
+- [Music Assistant HA integration](https://www.music-assistant.io/integration/installation/) — admin account requirement  
+- [Music Assistant filesystem source](https://www.music-assistant.io/music-providers/filesystem/) — folder layout and tag requirements  
+- [music-assistant/hass-music-assistant \#2956](https://github.com/music-assistant/hass-music-assistant/issues/2956) — PUID/PGID unused; `user:` for non-root  
+- [music-assistant/support \#4197](https://github.com/music-assistant/support/issues/4197) — separate `/cache` volume for non-root containers
