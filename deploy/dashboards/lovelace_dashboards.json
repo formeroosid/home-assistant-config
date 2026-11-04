@@ -27,6 +27,15 @@
         "show_in_sidebar": true,
         "title": "Sonarr",
         "url_path": "dashboard-sonarr"
+      },
+      {
+        "icon": "mdi:cctv",
+        "id": "grassburg_cameras",
+        "mode": "storage",
+        "require_admin": false,
+        "show_in_sidebar": true,
+        "title": "Grassburg Cameras",
+        "url_path": "grassburg-cameras"
       }
     ]
   },
