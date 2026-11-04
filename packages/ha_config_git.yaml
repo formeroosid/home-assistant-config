@@ -1,0 +1,82 @@
+# Watches ha-config-commit's own result, published by whitey as
+# /var/lib/ha-metrics/ha_git.json and surfaced as extra.ha_git on
+# sensor.whitey_metrics. Fails closed: missing or stale data is a problem.
+#
+# The commit job runs daily at 04:45 (+ up to 5 min jitter), so a healthy
+# result is at most about 24 h old. 26 h catches one missed run the same
+# morning without alerting on normal jitter.
+
+template:
+  - binary_sensor:
+      - name: HA Config Git Problem
+        unique_id: ha_config_git_problem
+        device_class: problem
+        icon: mdi:source-branch-remove
+        delay_on: "00:30:00"           # tolerate HA restarts and polling gaps
+        state: >
+          {% set e = state_attr('sensor.whitey_metrics', 'extra') %}
+          {% if e is not mapping or e.get('ha_git') is not mapping %}
+            {{ true }}
+          {% else %}
+            {% set g = e['ha_git'] %}
+            {% set age_h = (as_timestamp(now()) - (g.epoch | int(0))) / 3600 %}
+            {{ g.status not in ['pushed', 'up_to_date'] or age_h > 26 }}
+          {% endif %}
+        attributes:
+          status: >
+            {% set e = state_attr('sensor.whitey_metrics', 'extra') %}
+            {% if e is mapping and e.get('ha_git') is mapping %}
+              {{ e['ha_git'].status }}
+            {% else %}
+              no_data
+            {% endif %}
+          reason: >
+            {% set e = state_attr('sensor.whitey_metrics', 'extra') %}
+            {% if e is not mapping %}
+              whitey metrics sensor reported no data
+            {% elif e.get('ha_git') is not mapping %}
+              ha_git.json absent on whitey (old ha-config-commit, or timer not running?)
+            {% else %}
+              {% set g = e['ha_git'] %}
+              {{ g.detail }}; last run {{ ((as_timestamp(now()) - (g.epoch | int(0))) / 3600) | round(1) }}h ago;
+              {{ g.ahead }} commit(s) not on GitHub
+            {% endif %}
+
+automation:
+  - id: ha_config_git_problem_notify
+    alias: "Config Git: not reaching GitHub"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.ha_config_git_problem
+        to: "on"
+    actions:
+      - action: persistent_notification.create
+        data:
+          notification_id: ha_config_git_problem
+          title: "HA configuration is not reaching GitHub"
+          message: >
+            Status: {{ state_attr('binary_sensor.ha_config_git_problem', 'status') }}.
+            {{ state_attr('binary_sensor.ha_config_git_problem', 'reason') }}.
+            Check: sudo tail -20 /var/log/ha_bkup/ha-config-commit.log on whitey.
+      - action: notify.mobile_app_iphone
+        data:
+          title: "Homelab — config Git problem"
+          message: >
+            {{ state_attr('binary_sensor.ha_config_git_problem', 'status') }}:
+            {{ state_attr('binary_sensor.ha_config_git_problem', 'reason') }}
+          data:
+            tag: ha-config-git-problem
+            url: /dashboard-homelab/overview
+
+  - id: ha_config_git_problem_clear
+    alias: "Config Git: recovered"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.ha_config_git_problem
+        to: "off"
+    actions:
+      - action: persistent_notification.dismiss
+        data:
+          notification_id: ha_config_git_problem
