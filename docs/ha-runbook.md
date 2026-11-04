@@ -1,6 +1,6 @@
 # Home Assistant Runbook — Swamp Castle
 
-Last updated: 2026-10-17 Maintainer: Jamie Gordon Primary node: **whitey** (192.168.86.101)
+Last updated: 2026-11-04 Maintainer: Jamie Gordon Primary node: **whitey** (192.168.86.101)
 
 ---
 
@@ -240,7 +240,10 @@ Lumpy's rsnapshot job is the largest backup in the house — roughly 9.1 TB of m
 | :---- | :---- |
 | Config | `/etc/rsnapshot-lumpy.conf` — **not** the default `/etc/rsnapshot.conf`, which does not exist on lumpy |
 | Snapshot root | `/mnt/backup/.snapshots/.sync/lumpy_media/` |
-| Backup point | `backup /data/ lumpy_data/` |
+| Backup points | `backup /data/ lumpy_data/`, `backup /opt/beets/ lumpy_opt_beets/`, `backup /srv/docker/ lumpy_srv_docker/` |
+| Excludes / pre-exec | `exclude_file /etc/rsnapshot-lumpy.excludes`; `cmd_preexec /usr/local/sbin/plex-db-dump` (consistent Plex DB copy before the run) |
+| rsync args | `rsync_short_args -a`; `rsync_long_args --delete --numeric-ids --delete-excluded --bwlimit=20480` — `--relative` removed in October; bandwidth capped at 20 MiB/s so a run cannot saturate the NFS link |
+| Priority | `ha-rsnapshot-run` invokes rsnapshot under `ionice -c2 -n7 nice -n 19`, so backups yield to Plex and Frigate |
 | Underlying storage | `whitey:/srv/MediaBkup` over **NFS 4.2, autofs-mounted, `hard`** (see topology below) |
 | Retention | `retain daily 7`, `retain weekly 4` |
 | Log | `/var/log/rsnapshot-lumpy.log` |
@@ -600,12 +603,14 @@ Added 2026-08-30. Frigate itself is unchanged and stays on lumpy; only the Home 
 
 | Item | Value |
 | :---- | :---- |
-| Frigate host | lumpy, 192.168.86.100, Frigate 0.17 |
-| Integration | `frigate-hass-integration` v5.11.0, installed through HACS |
+| Frigate host | lumpy, 192.168.86.100, Frigate 0.18 (0.17 at install) |
+| Integration | `frigate-hass-integration` v5.15.6 as of 2026-11-04 (v5.11.0 at install), through HACS |
 | API URL configured in HA | `http://192.168.86.100:8971` |
 | API auth | Frigate UI username and password |
 | Event transport | MQTT to whitey `1883` as broker user `frigate` |
-| Cameras surfaced | four |
+| Cameras surfaced | four — `camera.driveway`, `camera.back_40`, `camera.front_door`, `camera.fertile_crescent` |
+| Cards | Advanced Camera Card and Frigate Modern card, both HACS frontend resources under `www/community/` |
+| Dashboard | **Grassburg Cameras** — Overview plus one view per camera (§6) |
 
 ### Order of operations
 
@@ -628,6 +633,12 @@ The password in Frigate's config uses Frigate's own `{FRIGATE_MQTT_PASSWORD}` su
 | `8971` | Authenticated UI and API | The correct choice for a separate host on the LAN |
 
 Port 8971 defaults to **TLS with a self-signed certificate**, which Home Assistant refuses to verify — so either TLS is disabled on Frigate and HA uses `http://`, or Frigate is issued a real JGDN certificate. Unchecking "Validate SSL" is the third option and the worst one.
+
+### Notifications (working)
+
+`automations.yaml` holds **Frigate - iPhone security alerts**, triggered by MQTT topic `frigate/reviews` and delivered to `notify.mobile_app_iphone` with the review snapshot. Verified end to end in early November 2026. Scope is deliberately selective: alerts, not every detection. Which labels and zones qualify is controlled on the Frigate side (review `alerts` labels and required zones per camera), so tuning a camera rarely needs an HA edit.
+
+Camera-side tuning recorded so far: Driveway gates review items on the `Car_Park` zone and masks a frequently misclassified tree for `person` only; Back_40 needs object filters, zones, review labels and notifications kept consistent with each other.
 
 ### Still to wire up
 
@@ -962,6 +973,7 @@ Defined in `config/packages/homelab_nodes.yaml`.
 | `sensor.oldest_backup_age` | Hours; `detail` attribute holds the per-source list |
 | `sensor.homelab_pending_updates` | Sum of pending apt packages across hosts |
 | `sensor.homelab_containers_running` | whitey \+ lumpy running container count |
+| `binary_sensor.ha_config_git_problem` | `problem` class, from `packages/ha_config_git.yaml`. On when `extra.ha_git` on whitey is missing, older than 26 h, or reports anything but `pushed`/`up_to_date` (§6a) |
 
 `scan_interval: 60`, `command_timeout: 20`, SSH `ConnectTimeout=8`. The SSH timeout fires first and cleanly, so HA never holds a sensor hung on a dead host.
 
@@ -971,16 +983,27 @@ Defined in `config/packages/homelab_nodes.yaml`.
 
 The SSH wrapper uses `StrictHostKeyChecking=yes`, not `accept-new` — known\_hosts is already seeded, so an unexpected host key should be a hard failure.
 
-`json_attributes` on all four metrics sensors includes `extra`, the passthrough for root-written state described in §4a. Lumpy's `extra.rsnapshot` is populated; the other three carry `{}` until uther's `vpn.json` lands.
+`json_attributes` on all four metrics sensors includes `extra`, the passthrough for root-written state described in §4a. Populated today: lumpy `extra.rsnapshot`; uther `extra.vpn` and `extra.bkup_freshness`; whitey `extra.ha_git` (once the 2026-11 `ha-config-commit` is installed).
+
+**Larry GPU.** Larry's `ha-metrics` adds `gpu_util_pct` from `nvidia-smi`; a failed sample is JSON `null`, never a fabricated 0. It is listed in the shared `&node_attrs` anchor and shown on larry's Nodes card. Larry's collector is therefore **no longer identical** to whitey's — `deploy/sbin/ha-metrics` is whitey's copy and has no GPU block; larry's copy is mirrored separately to `deploy/larry/ha-metrics`.
 
 ---
 
 ## 6\. Dashboard
 
-Dashboard **Homelab**, two views, defined via the raw configuration editor.
+Storage-mode dashboards (exported nightly to `deploy/dashboards/`):
 
-- **Overview** — Attention card, node/backup gauges, container and update tiles, per-node connectivity tiles, backup sentinel table, **Lumpy rsnapshot card**, uther service table.  
-- **Nodes** — per-host card with OS, kernel, uptime, load, memory, filesystems, RAID arrays, containers with image tags, and systemd units.
+| Dashboard | URL path | Content |
+| :---- | :---- | :---- |
+| Homelab | `dashboard-homelab` (admin only) | Infrastructure — detailed below |
+| Grassburg Cameras | `grassburg-cameras` | Overview plus Driveway, Back 40, Front Door, Fertile Crescent |
+| Sonarr | `dashboard-sonarr` | Sonarr status |
+| Map | `map` | Built-in |
+
+Dashboard **Homelab**, two views (`overview`, `nodes`), defined via the raw configuration editor.
+
+- **Overview** — Attention card, node/backup gauges, container and update tiles, per-node connectivity tiles, backup sentinel table, **Lumpy rsnapshot card**, uther service table, Uther VPN card, router/internet card for gilbert.  
+- **Nodes** — per-host card (larry's includes GPU utilization) with OS, kernel, uptime, load, memory, filesystems, RAID arrays, containers with image tags, and systemd units.
 
 The **Attention card is the point of the whole dashboard**. It walks every node, filesystem, container, and unit and surfaces only what is wrong; when everything is healthy it says so in one line. This inverts the usual homelab failure mode of forty gauges nobody reads after the first week.
 
@@ -1092,13 +1115,25 @@ Lumpy's key is `SHA256:Lkx4ehN8PuHKr/DkjIl24dFQG3YJnimRmNdlhzPKY1s`.
 
 Audited after the first commit — `rsnapshot-lumpy.conf` carries no credentials; `cmd_ssh /usr/bin/ssh` is a binary path and is unused, since these backups are local-to-NFS rather than over SSH.
 
-> **Known defect:** the auto-commit subject line truncates the file list. A commit touching nine files may name only five, so the git log understates what changed. Read `git show --stat` rather than trusting the subject.
-
 ### Auto-commit
 
 `ha-config-commit.timer`, daily 04:45, `RandomizedDelaySec=300`, `Persistent=true`. Placed after the 04:15 backup mirror so the day's commit includes anything that run changed.
 
-**`git push` failure is non-fatal by design** — it logs a warning and exits 0\. An internet outage must not become a failed unit and an alert; the commit still landed locally and the next successful run pushes both. Log: `/var/log/ha_bkup/ha-config-commit.log`.
+Order of a run (rewritten 2026-11-04 after two months of silently rejected pushes, §9):
+
+1. Refuse to run if a manual rebase is in progress.
+2. Snapshot whitey files into `deploy/sbin`, `deploy/systemd`, `deploy/logrotate`.
+3. Pull remote files over one `ssh -n` + `tar` connection per host, judged by files received rather than tar's exit status: **lumpy** (7 — `ha-rsnapshot-state`, `ha-rsnapshot-run`, `plex-db-dump`, `rsnapshot-lumpy.conf`, `rsnapshot-lumpy.excludes`, state service and timer), **uther** (3 — `ha-vpn-state` and units), **larry** (1 — its GPU-aware `ha-metrics`). Each is non-fatal and logs `<host>: snapshotted n of m`.
+4. Export dashboards from `.storage`.
+5. Commit if anything changed. Subject `Auto-commit YYYY-MM-DD: N file(s)`; the full file list is in the body.
+6. **Always** `git fetch`, rebase local commits onto `origin/main` (`--autostash`) if GitHub is ahead, then push if anything is unpushed. A conflicting rebase is aborted, leaving local commits intact.
+7. Write `/var/lib/ha-metrics/ha_git.json` (`status`, `ahead`, `behind`, `head`, `epoch`, `last_push_epoch`), which `ha-metrics` inlines as `extra.ha_git` on `sensor.whitey_metrics`.
+
+Statuses: `pushed`, `up_to_date` (healthy); `fetch_failed`, `push_failed`, `rebase_conflict`, `rebase_in_progress`, `commit_failed` (problems).
+
+**Network failure is still non-fatal** — exit 0, commit stays local, the next run delivers it. What changed is that the failure is no longer invisible: `binary_sensor.ha_config_git_problem` (§5) raises a persistent notification and an iPhone push after 30 minutes, and clears itself on recovery. Log: `/var/log/ha_bkup/ha-config-commit.log`.
+
+**Commits made off-whitey (GitHub web UI, another clone) are now safe** — the next run rebases onto them. Avoid editing files that whitey snapshots (`deploy/sbin`, `deploy/systemd`, `deploy/lumpy`, `deploy/uther`, `deploy/larry`, `deploy/dashboards`, live config) anywhere but on their source host, or the rebase will conflict.
 
 Credential audit before first commit — confirm no secrets in the snapshotted scripts:
 
@@ -1114,14 +1149,14 @@ As of 2026-08-20 this returns only `MAIL_TO`, `MAIL_FROM`, and `RELAY_HOST=jgord
 
 | Cadence | Task |
 | :---- | :---- |
-| Daily (automatic) | HA backup 03:30; mirror \+ verify 04:15; config auto-commit 04:45 |
+| Daily (automatic) | HA backup 03:30; mirror \+ verify 04:15; config auto-commit, rebase and push 04:45 (alerts via `binary_sensor.ha_config_git_problem`) |
 | Hourly (automatic) | `ha-rsnapshot-state` on lumpy refreshes rsnapshot state |
 | Weekly | Review Attention card; clear reboot-required flags; apt updates on all four nodes |
 | Monthly | Pull HA image for the current minor tag; check for a new HA minor release and read its breaking changes; `docker image prune` |
 | Monthly | Confirm `.last_backup` sentinels still readable by `hamon` (catches ACL inheritance failures) |
 | Monthly | Confirm `no_create_root` is still `1` in `/etc/rsnapshot-lumpy.conf` and `configtest` passes. A package upgrade or a hand edit reverting this is a filesystem-filling event, not an inconvenience. |
 | Monthly | Confirm the lumpy pull is still working — \`grep 'lumpy:' /var/log/ha\_bkup/ha-config-commit.log |
-| Monthly | Confirm `ha-config-commit` is still pushing — \`grep WARN /var/log/ha\_bkup/ha-config-commit.log |
+| Monthly | Confirm the larry and uther pulls are complete — `grep -E 'snapshotted|WARN' /var/log/ha_bkup/ha-config-commit.log \| tail` |
 | Monthly | Confirm MQTT is healthy — `frigate/available` reads `online` and the broker log shows both `hass` and `frigate` connected. A silent broker means no Frigate event entities, even though the camera pictures keep working from the API. |
 | Monthly | Check for a new Music Assistant stable release and read its notes. Upgrade by editing the pinned image tag in the stack and re-deploying; stay on the stable channel (§4f). Afterward confirm `Started streamserver on 192.168.86.101:8097` in the log and that the library still lists tracks |
 | Monthly | Confirm `/mnt/lumpy/music` is mounted on whitey and MA's library is non-empty. An empty library with no error means the container started before the NFS mount (§4f) |
@@ -1220,30 +1255,31 @@ As of 2026-08-20 this returns only `MAIL_TO`, `MAIL_FROM`, and `RELAY_HOST=jgord
 | Smart Fades failed: `PermissionError: [Errno 13] Permission denied: '/.cache'` | `HOME` unset for a non-root container, so `torch.hub` tried to create its cache at the filesystem root | `HOME=/data` and `XDG_CACHE_HOME=/cache` in the stack environment |
 | `PTP clock daemon could not start ... PTP timing is degraded` | PTP needs UDP 319/320; a non-root process cannot bind them, and Docker gives non-root users no ambient capabilities | Accepted. Affects only AirPlay 2 multi-room sync. Do not lower `ip_unprivileged_port_start`. See §4f |
 | NPM returned a gateway error for `ma.jamiegordon.net` | Forward Hostname was `http://192.168.86.101`; the scheme has its own field, so nginx got `http://http://…` | Bare `192.168.86.101`; also turn Websockets Support on and Cache Assets off |
+| GitHub showed no auto-commits from 2026-09-01 to 2026-11-04; nightly log line `WARN: push failed, commit is local only` with `! [rejected] main -> main (fetch first)` | Commit `6b00bc5` was made off-whitey on 2026-09-02; `ha-config-commit` never fetched, so every later push was non-fast-forward. The only trace was a root-only log line | One-off: `git fetch`, `git pull --rebase origin main`, `git push origin HEAD:main` (pushed `e334162`). Permanent: rewritten `ha-config-commit` fetches and rebases every run and publishes `extra.ha_git`; `binary_sensor.ha_config_git_problem` alerts (§6a) |
 | Both Sonos rooms dropped out repeatedly when grouped | Living Room (Playbase + surrounds) was group coordinator. The coordinator alone receives MA's stream and relays it, and the Playbase could not sustain that alongside feeding its surrounds. Starting on Piano Room was stable | Start groups on Piano Room. Permanent fix: wire the Playbase. Confirming tests pending. See §4f |
 
 ---
 
 ## 10\. Open items
 
-1. **Verify the first auto-commit run** fired at 04:45 and pushed.  
+1. **~~Verify the first auto-commit run.~~** Done; superseded by items 18 and 30.  
 2. **Confirm the first wrapped run** (16:00, 2026-08-21) populates `last_run_rc`, `last_run_seconds`, and `last_run_age_hours` with real values, then decide how the card should treat **rc 2** — see the exit-code note in §4a.  
-3. **Verify `rsync_long_args` are actually applied.** The config specifies `--delete --numeric-ids --relative --delete-excluded`, but the log shows only `-a --delete`. Either the log is abbreviating or the directive is being ignored — `--relative` in particular changes the on-disk layout.  
-4. **Fix the auto-commit subject-line truncation** so the git log names every changed file.  
-5. **Notifications.** The Attention card logic should become automations that push on node-unreachable (10+ min), stale backup, degraded RAID, stopped container, and filesystem over 85%. Local push via the companion app works without internet.  
+3. **~~Verify `rsync_long_args` are actually applied.~~** Resolved in October: `--relative` removed and `--bwlimit=20480` added (§4a). Original note: The config specifies `--delete --numeric-ids --relative --delete-excluded`, but the log shows only `-a --delete`. Either the log is abbreviating or the directive is being ignored — `--relative` in particular changes the on-disk layout.  
+4. **~~Fix the auto-commit subject-line truncation.~~** Done 2026-11-04: subject carries a count, the body lists every file.  
+5. **Notifications — partly done.** Working: Frigate iPhone alerts (§4d), node-offline iPhone alert (`Homelab - Node offline iPhone alert`, verified by shutting down larry), backup persistent notifications (§4e), config-Git alert (§6a). Still to build: stale backup push, degraded RAID, stopped container, filesystem over 85%. Original note: The Attention card logic should become automations that push on node-unreachable (10+ min), stale backup, degraded RAID, stopped container, and filesystem over 85%. Local push via the companion app works without internet.  
 6. **~~VPN egress verification on uther.~~** **Done 2026-08-24** — see §4b. Implemented as a standalone read-only `ha-vpn-state` collector on its own timer, *not* by extending `pia-refresh-wireguard` as originally planned: that script is a remediator and observation must not be able to trigger remediation. Remaining follow-ups: require a bad state to persist across two samples before alerting (see the PIA-refresh overlap note in §4b), and decide what to do about the deliberate DNS asymmetry.  
 7. **Offsite backup strategy.** Broader household decision; see §3.  
 8. **~~Add an HA sentinel to uther's backup freshness checker~~** — **partly done 2026-09-02**, see §4e. The checker now publishes to HA and has a dead man's switch. Still outstanding: HA's *own* backups are not yet among the four watched sources, so they remain unwatched from outside whitey.  
-9. **AsusWRT integration** for gilbert — WAN state, client list, presence.  
+9. **~~AsusWRT integration for gilbert.~~** Done with AsusRouter 0.40.1 (manual install, pinned). Presence for gussy/krizzy still to add.  
 10. **Distinguish host-down from SSH-broken** with a ping check per node.  
 11. **ratgdo32 purchase and install** — needs the opener learn-button colour.  
 12. **Brewing and cooking telemetry** — Tilt and Meater need a BLE path.  
 13. **Internet connectivity block in `ha-metrics` on all four hosts.** Designed but not built. Three layers, each `timeout`\-wrapped: gateway `192.168.86.1`; transit by IP literal (`1.1.1.1`, `9.9.9.9`, plus a TCP 443 fallback because ICMP may be filtered); and name resolution tested *separately*, because whitey **is** the resolver and a naive combined check would blame the internet for an unbound failure. `ha-vpn-state` already implements this pattern for uther and can be lifted from it.  
-14. **Finish the Frigate surface.** Add `media_source:` for the Media Browser, install Advanced Camera Card for scrubbable live views, and import the Frigate notification blueprint. Item 5 above now has a working event source for camera alerts.  
+14. **Finish the Frigate surface — partly done.** Advanced Camera Card is installed and the Grassburg Cameras dashboard exists; iPhone alerts work via a hand-written automation rather than the blueprint. Still outstanding: `media_source:` for the Media Browser. Item 5 above now has a working event source for camera alerts.  
 15. **Decide on broker transport security.** 1883 is cleartext on the LAN by design — both clients are wired hosts on the same segment and TLS would add certificate lifecycle to a path that currently has none. Revisit if any wireless or off-segment client (a BLE proxy, an ESPHome node) starts publishing.  
 16. **Confirm the Mosquitto password file is recoverable, not backed up.** It is deliberately gitignored and lives outside `/config`, so no backup covers it. That is acceptable only while both broker passwords are in 1Password — verify they are, and that §4c's two-command rebuild is accurate.
 17. **Add `bkup-freshness` and its two units to the uther snapshot in `ha-config-commit`.** `UTHER_FILES` currently lists only the three `ha-vpn-state` files, so the checker is not auto-mirrored. Add it **only after** the patched script is installed on uther — the snapshot copies uther's version *over* the git copy, so doing it first would revert the patch. Bump the `$n -eq 3` expected-count check at the same time.  
-18. **`ha-config-commit` never pulls.** It commits and pushes but has no `git pull`, so a commit made on GitHub directly leaves whitey behind, and whitey's next push then fails with only a `WARN: push failed, commit is local only` line in `/var/log/ha_bkup/ha-config-commit.log`. Nothing on the dashboard shows this. Either add `git pull --ff-only` before the snapshot, or surface push failure as an alert.  
+18. **~~`ha-config-commit` never pulls.~~** Fixed 2026-11-04 (§6a, §9). Original note: It commits and pushes but has no `git pull`, so a commit made on GitHub directly leaves whitey behind, and whitey's next push then fails with only a `WARN: push failed, commit is local only` line in `/var/log/ha_bkup/ha-config-commit.log`. Nothing on the dashboard shows this. Either add `git pull --ff-only` before the snapshot, or surface push failure as an alert.  
 19. **Retire `/usr/local/sbin/bkup-freshness.v1` and `.bak-2026-08-06`.** Both are still executable and one tab-completion away from being run by hand. Delete them; git is the history.  
 20. **Normalize krizzy's sentinel timestamp** to `date -Is` output. It writes `-0700` rather than `-07:00`, which GNU `date` tolerates today but is not RFC 3339.  
 21. **Fix larry's directory mode on whitey.** `drwxr-x--x+` where its siblings are `drwxrws---` — missing setgid and group-write. Unexplained; make it match before it causes a permissions surprise.  
@@ -1255,7 +1291,12 @@ As of 2026-08-20 this returns only `MAIL_TO`, `MAIL_FROM`, and `RELAY_HOST=jgord
 27. **Add MA's data directory to a backup set.** `/srv/whitey-r6/VarData/Docker-data/MusicAssistant/data` is on RAID6 only; exclude `cache`. Add the compose file, fstab fragment, and docker drop-in to `ha-config-commit`'s snapshot list so they are mirrored automatically.  
 28. **Add the Music Assistant integration to HA** at `http://192.168.86.101:8095` with an MA admin account, if not already done; then pair the Apple TVs and map a power entity for the Denon's HEOS player.  
 29. **Consider MA announcements as a notification path.** Backup-failure and host-down alerts could also be spoken over a Sonos group, alongside item 5.  
-30. **Check whether whitey's auto-commit has been pushing.** As of 2026-10-17 GitHub's last push was 2026-09-02 (`6b00bc5`), which is the failure mode item 18 predicts. Run `sudo grep WARN /var/log/ha_bkup/ha-config-commit.log | tail` and reconcile whitey's local history with `origin/main`.  
+30. **~~Check whether whitey's auto-commit has been pushing.~~** It had not; reconciled 2026-11-04 (`e334162`). Original note: As of 2026-10-17 GitHub's last push was 2026-09-02 (`6b00bc5`), which is the failure mode item 18 predicts. Run `sudo grep WARN /var/log/ha_bkup/ha-config-commit.log | tail` and reconcile whitey's local history with `origin/main`.  
+31. **Verify the 2026-11-04 `ha-config-commit` and `packages/ha_config_git.yaml`.** After the first 04:45 run: `cat /var/lib/ha-metrics/ha_git.json` shows `pushed` or `up_to_date`, `state_attr('sensor.whitey_metrics','extra').ha_git` is populated in Settings → Tools → Template, and the binary sensor is off. Check root on whitey reaches larry: `sudo ssh -n -o BatchMode=yes larry true`.  
+32. **Stop tracking runtime and backup files.** `.shopping_list.json` (HA runtime data) and `packages/homelab_nodes.yaml.bak.20261018-165253` are committed. Add `.shopping_list.json` and `*.bak*` to `.gitignore`, then `git rm --cached` both on whitey — not on GitHub, or the next rebase deletes them from disk.  
+33. **Commit the Mosquitto assets.** `deploy/mosquitto/` (compose and `mosquitto.conf`) is referenced in §4c but does not exist in the repo.  
+34. **Decide whether larry's GPU block should go into every host's `ha-metrics`** (guarded by `command -v nvidia-smi`), restoring the one-identical-collector rule, or stay larry-only with `deploy/larry/` as its record.  
+35. **Add Music Assistant files to the snapshot only after item 25** reconciles the live stack with `deploy/music-assistant/compose.yaml`; snapshotting first would overwrite the intended file with the live one.  
 
 ---
 
