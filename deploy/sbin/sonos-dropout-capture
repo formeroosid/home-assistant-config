@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# sonos-dropout-capture — record per-speaker ping, Music Assistant logs,
+# NFS client stats, and container CPU while reproducing a playback dropout.
+# Runbook §4f. Install: /usr/local/sbin/sonos-dropout-capture, mode 755.
+#
+# Usage: sonos-dropout-capture IP [IP ...]
+#   Press Ctrl-C after the dropout; note the wall-clock time of each dropout.
+set -u
+
+LOG_ROOT="/srv/whitey-r6/VarData/diag"
+MA_CONTAINER="music-assistant"
+NFS_MOUNT="/mnt/lumpy/music"
+PING_INTERVAL="0.5"
+
+if [ "$#" -lt 1 ]; then
+  echo "usage: $(basename "$0") SPEAKER_IP [SPEAKER_IP ...]" >&2
+  echo "find IPs: avahi-browse -rpt _sonos._tcp" >&2
+  exit 2
+fi
+TARGETS=( "$@" )
+
+RUN_DIR="${LOG_ROOT}/sonos-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "${RUN_DIR}" || exit 1
+echo "Logging to ${RUN_DIR}"
+
+for ip in "${TARGETS[@]}"; do
+  ping -D -O -i "${PING_INTERVAL}" "${ip}" > "${RUN_DIR}/ping-${ip}.log" 2>&1 &
+done
+
+docker logs -f -t --since 0s "${MA_CONTAINER}" > "${RUN_DIR}/ma.log" 2>&1 &
+if command -v nfsiostat >/dev/null 2>&1; then
+  nfsiostat 5 "${NFS_MOUNT}" > "${RUN_DIR}/nfsiostat.log" 2>&1 &
+else
+  echo "nfsiostat not found (package nfs-common); skipping NFS stats" >&2
+fi
+docker stats --format '{{.Name}} {{.CPUPerc}} {{.MemUsage}}' "${MA_CONTAINER}" \
+  > "${RUN_DIR}/docker-stats.log" 2>&1 &
+
+summarize() {
+  kill $(jobs -p) 2>/dev/null
+  wait 2>/dev/null
+  echo
+  echo "== lost replies per speaker"
+  grep -c 'no answer' "${RUN_DIR}"/ping-*.log
+  echo "== replies over 100 ms (first 40)"
+  awk -F'time=' 'NF>1{split($2,a," "); if (a[1]+0 > 100) print FILENAME": "$0}' \
+    "${RUN_DIR}"/ping-*.log | head -40
+  echo "Results in ${RUN_DIR}"
+  exit 0
+}
+trap summarize INT TERM
+wait
