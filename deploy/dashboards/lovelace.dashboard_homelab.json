@@ -1,6 +1,7 @@
 {
   "views": [
     {
+      "header": {},
       "max_columns": 3,
       "path": "overview",
       "sections": [
