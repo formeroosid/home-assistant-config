@@ -4,12 +4,12 @@
       {
         "id": "a13056d952b04a48963e15cd3abe571e",
         "type": "module",
-        "url": "/hacsfiles/frigate-modern-hass-card/frigate-modern-hass-card.js?hacstag=1256395737131"
+        "url": "/local/community/frigate-modern-hass-card/frigate-modern-hass-card.js?v=1256395737131"
       },
       {
         "id": "4306db2f33f2445f9c4d15a40d2f5111",
         "type": "module",
-        "url": "/hacsfiles/advanced-camera-card/advanced-camera-card.js?hacstag=394082552810"
+        "url": "/local/community/advanced-camera-card/advanced-camera-card.js?v=394082552810"
       }
     ]
   },
