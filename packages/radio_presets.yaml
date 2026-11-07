@@ -1,0 +1,77 @@
+# Radio presets for Music Assistant players.
+#
+# Sonos coordinator rule (runbook §4f, finding 2026-10-17): in a native Sonos
+# group MA streams only to the coordinator, which relays to the members.
+# Living Room (Playbase on Wi-Fi) as coordinator drops out in both rooms;
+# Piano Room as coordinator is stable. This script therefore reproduces the
+# verified order exactly: break up any existing group, start the stream on
+# Piano Room, then add Living Room to it. It never lets Living Room lead.
+#
+# Targets must be the Music Assistant entities, not the Sonos integration's
+# look-alikes; music_assistant.play_media rejects non-MA entities.
+
+script:
+  radio_ellensburg_piano_living:
+    alias: "Radio: Ellensburg Community Radio (Piano Room + Living Room)"
+    description: >
+      Plays Ellensburg Community Radio on Piano Room, then groups Living Room
+      under it so Piano Room is the Sonos coordinator.
+    icon: mdi:radio
+    mode: single
+    max_exceeded: silent        # a second tap while running is ignored
+    sequence:
+      - alias: "Break up existing groups so Living Room cannot remain coordinator"
+        action: media_player.unjoin
+        target:
+          entity_id:
+            - media_player.living_room
+            - media_player.piano_room
+        continue_on_error: true  # unjoining an ungrouped player is harmless
+
+      - delay: "00:00:02"        # let Sonos settle the topology change
+
+      - alias: "Start the station on Piano Room (the coordinator)"
+        action: music_assistant.play_media
+        target:
+          entity_id: media_player.piano_room
+        data:
+          # MA library URI (Edit radio station → URI). A URI is exact; the
+          # display name is a custom name and a name search could miss it.
+          media_id: "library://radio/2"   # Ellensburg Community Radio
+          media_type: radio
+          enqueue: replace
+
+      - alias: "Wait for Piano Room to be playing before adding members"
+        wait_template: "{{ is_state('media_player.piano_room', 'playing') }}"
+        timeout: "00:00:20"
+        continue_on_timeout: false   # no stream, no group
+
+      - alias: "Add Living Room as a member of Piano Room's group"
+        action: media_player.join
+        target:
+          entity_id: media_player.piano_room
+        data:
+          group_members:
+            - media_player.living_room
+
+      - alias: "Confirm the group formed with Piano Room leading"
+        wait_template: >
+          {% set g = state_attr('media_player.piano_room', 'group_members') or [] %}
+          {{ 'media_player.living_room' in g
+             and (g | first) == 'media_player.piano_room' }}
+        timeout: "00:00:15"
+        continue_on_timeout: true
+
+      - if:
+          - condition: template
+            value_template: "{{ not wait.completed }}"
+        then:
+          - action: persistent_notification.create
+            data:
+              notification_id: radio_ellensburg_group
+              title: "Radio: Living Room did not join Piano Room"
+              message: >
+                Ellensburg Community Radio is playing on Piano Room, but the group
+                did not form within 15 s. group_members =
+                {{ state_attr('media_player.piano_room', 'group_members') }}.
+                Add Living Room from the MA UI (start on Piano Room, then add).
