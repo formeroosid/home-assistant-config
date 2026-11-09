@@ -16,7 +16,7 @@
         "mode": "storage",
         "require_admin": true,
         "show_in_sidebar": true,
-        "title": "Homelab",
+        "title": "Grassburg Homelab",
         "url_path": "dashboard-homelab"
       },
       {
