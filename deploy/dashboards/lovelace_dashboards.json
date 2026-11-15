@@ -14,7 +14,7 @@
         "icon": "mdi:server-network",
         "id": "dashboard_homelab",
         "mode": "storage",
-        "require_admin": true,
+        "require_admin": false,
         "show_in_sidebar": true,
         "title": "Grassburg Homelab",
         "url_path": "dashboard-homelab"
