@@ -105,10 +105,14 @@ pull_host lumpy deploy/lumpy rsnapshot \
   etc/systemd/system/ha-rsnapshot-state.service \
   etc/systemd/system/ha-rsnapshot-state.timer
 
-pull_host uther deploy/uther vpn \
+pull_host uther deploy/uther monitoring \
   usr/local/sbin/ha-vpn-state \
   etc/systemd/system/ha-vpn-state.service \
-  etc/systemd/system/ha-vpn-state.timer
+  etc/systemd/system/ha-vpn-state.timer \
+  usr/local/sbin/bkup-freshness \
+  etc/systemd/system/bkup-freshness.service \
+  etc/systemd/system/bkup-freshness.timer
+
 
 # Larry's collector carries the GPU block, so it is no longer identical to
 # whitey's copy in deploy/sbin/. Keep it separately.

@@ -1,0 +1,6 @@
+[Unit]
+Description=Verify larry/gussy/krizzy backup freshness on whitey
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/bkup-freshness
